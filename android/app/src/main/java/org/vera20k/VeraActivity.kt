@@ -4,7 +4,12 @@ import android.app.Activity
 import android.app.NativeActivity
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.os.Bundle
 import android.provider.DocumentsContract
+import android.view.View
+import android.view.WindowInsets
+import android.view.WindowInsetsController
 import java.io.File
 import java.io.IOException
 
@@ -31,6 +36,53 @@ class VeraActivity : NativeActivity() {
 
         /** What the engine opens directly; a folder without these is not RA2. */
         val REQUIRED_ARCHIVES = listOf("ra2md.mix", "ra2.mix")
+    }
+
+    /**
+     * The app's own files folder. External storage first, because `adb push`
+     * and a file manager can reach it without root; internal storage when the
+     * device has no external volume mounted for this app.
+     */
+    fun dataDir(): File = getExternalFilesDir(null) ?: filesDir
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        hideSystemBars()
+    }
+
+    /**
+     * A phone has no keyboard to win a bar back from: hide the system bars
+     * again whenever the window regains focus, since a swipe or a notification
+     * brings them back as a transient overlay.
+     */
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) hideSystemBars()
+    }
+
+    /**
+     * Immersive mode: the navigation and status bars stay off until the player
+     * swipes them in, so the tactical view owns the whole screen instead of
+     * losing a strip of it to the back/home/menu column.
+     */
+    private fun hideSystemBars() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.insetsController?.let {
+                it.hide(WindowInsets.Type.systemBars())
+                it.systemBarsBehavior =
+                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = (
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                    or View.SYSTEM_UI_FLAG_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                )
+        }
     }
 
     /**
@@ -95,7 +147,7 @@ class VeraActivity : NativeActivity() {
         val job = AssetImportJob.begin() ?: return
         val worker = Thread {
             val result = try {
-                val free = filesDir.usableSpace
+                val free = dataDir().usableSpace
                 if (free < REQUIRED_BYTES) {
                     throw IOException(
                         "not enough free space: " + (free shr 20) + " MB free, " +
@@ -112,7 +164,7 @@ class VeraActivity : NativeActivity() {
                 if (missing.isNotEmpty()) {
                     throw IOException("that folder has no " + missing.joinToString(" or "))
                 }
-                val target = job.run(filesDir,
+                val target = job.run(dataDir(),
                     { staging -> copyTree(Uri.parse(treeUri), staging, job) },
                     { staging -> nativeConfigForImport(staging.absolutePath) },
                 )

@@ -165,3 +165,5 @@ tools/vendor-eval/
 /android/local.properties
 /android/**/build/
 /android/app/src/main/jniLibs/
+
+/android/gradle/gradle-daemon-jvm.properties

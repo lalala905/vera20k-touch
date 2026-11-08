@@ -15,7 +15,7 @@ Everything Android-specific lives in `android/`: it is both the
 |---|---|
 | `android/Cargo.toml`, `android/src/lib.rs` | The `vera20k-android` cdylib: `android_main`, the working-directory fix, and the hand-off to `vera20k::entry::run_with_loop`. Body is `#![cfg(target_os = "android")]`, so desktop builds compile it empty. |
 | `android/app/` | The only Gradle module: `VeraActivity`, `hasCode="true"`. |
-| `android/app/src/main/java/org/vera20k/VeraActivity.kt` | Starts the system folder picker and reads the selected tree through Android's `ContentResolver`. |
+| `android/app/src/main/java/org/vera20k/VeraActivity.kt` | Starts the system folder picker and reads the selected tree through Android's `ContentResolver`; hides the system bars on start and on focus gain, and owns the app's data folder (external when the volume is mounted). |
 | `android/app/src/main/java/org/vera20k/AssetImportJob.kt` | Owns import admission, cancellation, safe destination paths and atomic publication of the completed copy. Its filesystem tests run on the JVM. |
 | `android/app/src/main/jniLibs/` | Where `cargo ndk -o` writes `libvera20k_android.so`. Generated, git-ignored. |
 | `src/entry.rs` | Start-up shared with the desktop binary: logging, panic hook, banner, event loop, exit status. `main.rs` is now just the CLI switches plus a call into it. |
@@ -24,12 +24,27 @@ The library name must stay in sync: the crate is `vera20k-android`, so the
 artifact is `libvera20k_android.so`, and the manifest's
 `android.app.lib_name` is `vera20k_android`.
 
+## Data folder
+
+`android_main` hands the app's writable folder to the engine before anything
+opens a file: external app storage (`/sdcard/Android/data/org.vera20k/files`)
+when the volume is mounted, the internal folder otherwise. External comes first
+because `adb push` and a file manager can reach it, so a copy of the retail
+files dropped into `files/ra2` is picked up without an import — on start-up the
+entry writes `files/config.toml` pointing at `ra2` when that folder holds
+`ra2md.mix` and no config exists yet. The folder picker's import copies into
+the same folder and still owns `config.toml` when it runs.
+
+
 ## Building
 
 Prerequisites: `platforms;android-36`, `build-tools;36.1.0`, `ndk;28.2.13676358`,
 `cargo-ndk`, a JDK 17+ that `JAVA_HOME` and `PATH` agree on. The Gradle wrapper
 is committed, so no separate Gradle install is needed — the first `gradlew` run
-downloads the distribution it pins.
+downloads the distribution it pins. Android Studio writes
+`android/gradle/gradle-daemon-jvm.properties` (which pins the daemon to the
+IDE's JDK 25); it is git-ignored, and a command-line build under another JDK
+needs it removed, or Studio's JDK installed and exported.
 
 Run every command below from the repository root.
 
@@ -69,7 +84,20 @@ for `CARGO_PROFILE_SHIPPING_STRIP`, and
 
 - **`NativeActivity`, not `GameActivity`.** Smallest M0. It has no IME, so text
   entry (player name, chat, passwords) is unusable until P6 chooses: switch winit
-  to `android-game-activity`, or overlay a Java `EditText` and add JNI.
+  to `android-game-activity`, or overlay a Java `EditText` and add JNI. The
+  latter is the only text surface a hand-held screen has; until it exists the LAN
+  lobby's name and chat fields cannot be typed on the device.
+- **Touch follows Rusted Warfare.** A tap clicks, a one-finger battlefield drag
+  pans the camera with the map under the finger, a two-finger drag draws the
+  select box over the rectangle they span, a two-finger tap cancels the
+  selection, and a long still touch is the right click. `mouse.shp` stays
+  hidden while a finger drives the pointer; the synthetic cursor still feeds
+  every hit test. The system Back button arrives as `BrowserBack`, which the
+  handler rewrites to Escape so the pause menu and confirmation pages are
+  reachable without a keyboard.
+- **Immersive window.** The activity hides the navigation and status bars on
+  start and on every focus gain, so the nav column does not eat a strip of the
+  tactical view; a swipe still brings them back as a transient overlay.
 - **Vulkan only.** The manifest requires `android.hardware.vulkan.level 0`;
   GLES-only devices cannot install. Whether to port the existing `webgl`
   fallback to a runtime capability check is P4's call.

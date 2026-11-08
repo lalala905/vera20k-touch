@@ -240,6 +240,26 @@ fn keep_screen_on(app: &AndroidApp) {
     );
 }
 
+/// Point the engine at `ra2/` when the player put the game files there by
+/// hand.
+///
+/// The folder picker's import writes its own `config.toml`, but `adb push` and
+/// a file manager copy files into this folder directly; without this, a pushed
+/// copy sits in place while the missing-files card still asks for an import.
+/// Only an unset config is written: an existing one keeps every setting and
+/// path the player chose.
+fn adopt_pushed_game_files(dir: &std::path::Path) {
+    let config = dir.join("config.toml");
+    let game = dir.join("ra2");
+    if config.exists() || !game.join("ra2md.mix").is_file() {
+        return;
+    }
+    let text = format!("[paths]\nra2_dir = \"{}\"\n", game.display());
+    if let Err(error) = std::fs::write(&config, text) {
+        eprintln!("cannot write {}: {error}", config.display());
+    }
+}
+
 /// Resolved by `android-activity`'s loader trampoline; the name is the ABI.
 ///
 /// Android calls the symbol with the activity's handle, which
@@ -249,16 +269,23 @@ fn android_main(app: AndroidApp) {
     keep_screen_on(&app);
     vera20k::util::folder_picker::install(request_folder_picker, cancel_import);
     // Android starts every process in "/" with no writable home. Hand the app's
-    // private folder to the engine before anything opens a file: it becomes
+    // writable folder to the engine before anything opens a file: it becomes
     // both the working directory and the settings folder, so logs, config.toml,
-    // VERA.INI, saves and replays all persist there.
-    match app.internal_data_path() {
+    // VERA.INI, saves and replays all persist there. External storage comes
+    // first so `adb push` and a file manager can reach the same folder the game
+    // reads; without it the app's own folder is used.
+    match app
+        .external_data_path()
+        .or_else(|| app.internal_data_path())
+    {
         Some(dir) => {
             if let Err(error) = vera20k::entry::adopt_android_data_dir(&dir) {
                 eprintln!("cannot use the app data directory: {error:#}");
+            } else {
+                adopt_pushed_game_files(&dir);
             }
         }
-        None => eprintln!("no internal data path; logs and settings will not persist"),
+        None => eprintln!("no writable app data path; logs and settings will not persist"),
     }
 
     let log_path = vera20k::entry::init_logging();
