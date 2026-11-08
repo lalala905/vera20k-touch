@@ -812,6 +812,17 @@ pub(crate) fn unselect_all(state: &mut AppState) {
     queue_selection_snapshot_command(state, Vec::new(), false);
 }
 
+/// Move the live band box's fixed corner to a two-finger touch pair's current
+/// top-left, so the box follows both edges of the hand. The selection owner
+/// still resolves the rectangle through `end_drag`.
+pub(crate) fn reanchor_touch_box(state: &mut AppState, top_left: (f32, f32)) {
+    state
+        .match_state
+        .input
+        .selection_state
+        .reanchor_drag(top_left.0, top_left.1);
+}
+
 /// Did the band rectangle cover any drawn object? Screen-space rectangle in, the
 /// native "is the box empty" answer out.
 fn band_caught_drawn_object(

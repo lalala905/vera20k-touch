@@ -55,7 +55,9 @@ pub(crate) fn top_software_cursor(
 ) -> Option<(&BatchTexture, SpriteInstance)> {
     // Outside the client area, or over an inactive window, the system arrow
     // owns the pointer; mouse.shp would otherwise stay painted next to it.
-    if !state.platform.owns_pointer() {
+    // A finger owns the pointer on a touchscreen: the contact marks the spot
+    // and mouse.shp would otherwise stay painted at the last touch.
+    if !state.platform.owns_pointer() || state.match_state.input.cursor_from_touch {
         return None;
     }
     let cursor = state

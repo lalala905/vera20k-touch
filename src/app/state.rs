@@ -250,6 +250,16 @@ impl AppState {
                     .draws_over_battlefield())
     }
 
+    /// Whether mouse.shp should be painted at all this frame. A touch-driven
+    /// pointer hides it: the finger already marks the spot, and a hand-held
+    /// screen has no hover cursor to follow. The synthetic cursor the touch
+    /// mapper parks still feeds every hit test; only the sprite is gone. The
+    /// next hardware pointer movement clears `cursor_from_touch` and brings it
+    /// back.
+    pub(crate) fn software_cursor_drawn(&self) -> bool {
+        self.use_software_cursor() && !self.match_state.input.cursor_from_touch
+    }
+
     /// Whether any main-menu modal dialog (exit confirm, options, keyboard)
     /// is currently open.
     pub(crate) fn main_menu_dialog_open(&self) -> bool {

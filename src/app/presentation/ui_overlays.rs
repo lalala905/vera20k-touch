@@ -2165,7 +2165,7 @@ pub(crate) fn build_software_cursor_instances(
     state: &AppState,
     targets: &CursorTargets,
 ) -> (Vec<SpriteInstance>, Option<SoftwareCursorDraw>) {
-    if !state.use_software_cursor() || !state.match_state.input.cursor_visibility.is_visible() {
+    if !state.software_cursor_drawn() || !state.match_state.input.cursor_visibility.is_visible() {
         return (Vec::new(), None);
     }
     let Some((id, sequence)) = active_cursor_sequence(state, targets) else {

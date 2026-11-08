@@ -30,6 +30,79 @@ fn capture_render_continues(deadline: &mut Option<Instant>, outcome: FrameRender
     }
 }
 
+/// The key an Android Back edge reports as, translated to the game's key.
+///
+/// winit's Android backend reports the system Back button (hardware key and
+/// gesture) as `NamedKey::BrowserBack` with no physical code. No screen acts on
+/// that key, so on a phone without a keyboard nothing consumed Back: the pause
+/// menu, confirmation cards and abort boxes were unreachable. Every screen
+/// already handles Escape, so the Android entry rewrites Back into it. The
+/// helper stays target-independent so a desktop test can pin the mapping;
+/// other platforms never call it, and their own BrowserBack keeps its meaning.
+#[cfg(any(target_os = "android", test))]
+fn android_back_as_escape_key(
+    key: &winit::keyboard::Key,
+) -> Option<winit::keyboard::Key> {
+    matches!(
+        key,
+        winit::keyboard::Key::Named(winit::keyboard::NamedKey::BrowserBack)
+    )
+    .then(|| winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape))
+}
+
+/// Whether a window-space contact landed over the tactical viewport — the
+/// battlefield box less the sidebar column and the bottom strip. A one-finger
+/// battlefield drag pans the camera and a pair draws the select box; a drag
+/// over the sidebar, a menu or the letterbox keeps its left button. A modal
+/// in-game shell covers the whole window, so nothing is battlefield while one
+/// is open. The touch call site is the non-Linux one, so only the tests use it
+/// on Linux.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+fn touch_over_battlefield(state: &AppState, location: winit::dpi::PhysicalPosition<f64>) -> bool {
+    if state.match_state.match_presentation.in_game_menu.is_open() {
+        return false;
+    }
+    point_over_tactical_viewport(
+        state.tactical_zoom(),
+        location,
+        crate::app::input::camera::tactical_viewport_size(state),
+    )
+}
+
+/// The geometry half of [`touch_over_battlefield`], split out so the region
+/// test needs no app state: a window-space point mapped back through the match
+/// zoom and compared with the tactical frame.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+fn point_over_tactical_viewport(
+    zoom: Option<crate::render::upscale_pass::ZoomGeometry>,
+    location: winit::dpi::PhysicalPosition<f64>,
+    tactical: (u32, u32),
+) -> bool {
+    let (x, y) = (location.x as f32, location.y as f32);
+    let (source_x, source_y) = match zoom {
+        Some(zoom) => {
+            let (origin_x, origin_y) = (zoom.origin.0 as f32, zoom.origin.1 as f32);
+            if x < origin_x || y < origin_y {
+                return false;
+            }
+            let scale = zoom.scale();
+            ((x - origin_x) / scale, (y - origin_y) / scale)
+        }
+        None => (x, y),
+    };
+    let (width, height) = tactical;
+    source_x >= 0.0 && source_y >= 0.0 && source_x < width as f32 && source_y < height as f32
+}
+
+/// A window-space touch point in the source pixels the match reads and hit
+/// tests in — the same space `set_cursor_from_window` maps a contact to.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+fn touch_source_point(state: &AppState, point: (f32, f32)) -> (f32, f32) {
+    state
+        .tactical_zoom()
+        .map_or(point, |zoom| zoom.window_to_source(point.0, point.1))
+}
+
 impl App {
     /// An event can interrupt WaitUntil before a capture's render cadence.
     /// Keep that render deadline while still waking for independently due
@@ -608,6 +681,28 @@ impl ApplicationHandler for App {
         {
             return;
         }
+        // Android's system Back button arrives as `BrowserBack`; every screen
+        // reacts to Escape, so translate here, before any consumer sees it.
+        #[cfg(target_os = "android")]
+        let event = match event {
+            WindowEvent::KeyboardInput {
+                device_id,
+                mut event,
+                is_synthetic,
+            } => {
+                if let Some(logical) = android_back_as_escape_key(&event.logical_key) {
+                    event.logical_key = logical;
+                    event.physical_key = PhysicalKey::Code(KeyCode::Escape);
+                    event.text = None;
+                }
+                WindowEvent::KeyboardInput {
+                    device_id,
+                    event,
+                    is_synthetic,
+                }
+            }
+            other => other,
+        };
         if let Some(job) = &mut self.pending_initialization {
             if job.window_id() == _id {
                 if matches!(event, WindowEvent::CloseRequested) {
@@ -690,15 +785,37 @@ impl ApplicationHandler for App {
                     return;
                 }
                 let in_game = state.frontend.screen == GameScreen::InGame;
+                // A contact over the battlefield is what turns a one-finger
+                // drag into the camera pan and admits the second finger of the
+                // select box; anywhere else the drag keeps the left button.
+                let over_battlefield = in_game && touch_over_battlefield(state, touch.location);
                 let scale = state.platform.window.scale_factor();
                 let output = state.match_state.input.touch_mapper.translate(
                     touch,
                     Instant::now(),
-                    in_game,
+                    over_battlefield,
                     scale,
                 );
                 // The pointer is the finger's until a real mouse moves again.
                 state.match_state.input.cursor_from_touch = true;
+                if let Some(anchor) = output.band_anchor
+                    && in_game
+                {
+                    // A two-finger box owns both edges of the rectangle, so
+                    // re-anchor the selection drag's fixed corner to the pair's
+                    // current top-left before the synthetic move updates the
+                    // opposite corner. This is what lets the box grow left and
+                    // up as well as right and down.
+                    let top_left = touch_source_point(state, anchor);
+                    dispatch::reanchor_touch_box(state, top_left);
+                }
+                if output.deselect && in_game {
+                    // A two-finger tap cancels the selection through the
+                    // selection owner's own clear (`Unselect_All_With_Mode_Reset
+                    // 0x0048DC90`) rather than a synthetic click, which would
+                    // re-select whatever object sits under the fingers.
+                    dispatch::unselect_all(state);
+                }
                 if let Some((dx, dy)) = output.pan
                     && in_game
                 {

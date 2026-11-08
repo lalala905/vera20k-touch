@@ -450,7 +450,10 @@ impl MatchInputState {
             shown_cursor: Default::default(),
             minimap_press_button: None,
             touch_mapper: crate::app::input::touch::TouchMouseMapper::new(),
-            cursor_from_touch: false,
+            // A touchscreen has no pointer to draw a cursor for: hide
+            // mouse.shp from the first frame on Android, and let the first real
+            // `CursorMoved` (a Bluetooth mouse) bring it back.
+            cursor_from_touch: cfg!(target_os = "android"),
             selection_state: crate::sim::selection::SelectionState::new(),
             selection_order: Vec::new(),
             selection_order_pending: false,

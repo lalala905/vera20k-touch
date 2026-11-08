@@ -200,8 +200,26 @@ impl SelectionState {
             DragPhase::None => SelectAction::None,
         }
     }
+    /// Move the live drag's fixed corner without ending it. A two-finger
+    /// touch box follows both edges of the hand, so the input layer re-anchors
+    /// the rectangle on every move and the release still resolves through
+    /// [`Self::end_drag`]. No-op with no drag in progress.
+    pub fn reanchor_drag(&mut self, screen_x: f32, screen_y: f32) {
+        self.phase = match self.phase {
+            DragPhase::Pending { .. } => DragPhase::Pending {
+                start_x: screen_x,
+                start_y: screen_y,
+            },
+            DragPhase::BandBoxActive { .. } => DragPhase::BandBoxActive {
+                start_x: screen_x,
+                start_y: screen_y,
+            },
+            DragPhase::None => return,
+        };
+    }
 
     /// Cancel any in-progress drag without selecting.
+
     pub fn cancel_drag(&mut self) {
         self.phase = DragPhase::None;
         self.drag_current = None;
@@ -294,6 +312,32 @@ mod tests {
         sel.begin_drag(0.0, 0.0);
         assert_eq!(sel.update_drag(3.0, 3.0), DragTransition::NoChange);
     }
+    /// A two-finger touch box keeps following the hand: re-anchoring moves the
+    /// fixed corner without ending the drag, and the release still resolves the
+    /// rectangle from the new corner.
+    #[test]
+    fn reanchoring_a_live_drag_moves_the_fixed_corner() {
+        let mut sel = SelectionState::new();
+        sel.begin_drag(100.0, 100.0);
+        assert_eq!(sel.update_drag(200.0, 200.0), DragTransition::Activated);
+
+        sel.reanchor_drag(50.0, 40.0);
+        assert!(sel.is_band_box_active());
+        let Some((min_x, min_y, _, _)) = sel.drag_rect() else {
+            panic!("the live rectangle must survive the re-anchor");
+        };
+        assert_eq!((min_x, min_y), (50.0, 40.0));
+
+        let SelectAction::BoxSelect(min_x, min_y, max_x, max_y) = sel.end_drag(200.0, 200.0) else {
+            panic!("an active drag must end as a box selection");
+        };
+        assert_eq!((min_x, min_y, max_x, max_y), (50.0, 40.0, 200.0, 200.0));
+
+        // Without a live drag the re-anchor is a no-op, not a new drag.
+        sel.reanchor_drag(10.0, 10.0);
+        assert!(!sel.is_dragging());
+    }
+
 
     #[test]
     fn test_cancel_drag() {
