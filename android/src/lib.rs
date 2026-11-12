@@ -55,12 +55,40 @@ fn request_folder_picker() -> bool {
 }
 
 fn cancel_import() -> bool {
-    with_activity(|env, activity| {
+    let folder_copy = with_activity(|env, activity| {
         env.call_method(activity, "cancelImport", "()Z", &[])
             .and_then(|value| value.z())
             .unwrap_or(false)
     })
-    .unwrap_or(false)
+    .unwrap_or(false);
+    // The ZIP import runs on a thread of its own, not the activity's copy job,
+    // so both owners get the request and either may have one running.
+    folder_copy | vera20k::app::game_import::cancel()
+}
+
+/// The ZIP the player picked, copied into the cache by [`VeraActivity`].
+///
+/// The activity copies the `content://` document to a real file first: the
+/// extractor opens a filesystem path. An empty string means the copy failed.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_vera20k_VeraActivity_nativeOnZipPicked(
+    mut env: jni::JNIEnv,
+    _activity: JObject,
+    path: JString,
+) {
+    let path = env
+        .get_string(&path)
+        .ok()
+        .map(|text| text.to_string_lossy().into_owned())
+        .filter(|text| !text.is_empty());
+    match path {
+        Some(path) => vera20k::app::game_import::start(std::path::PathBuf::from(path)),
+        None => {
+            vera20k::util::import_status::note(vera20k::util::import_status::ImportEvent::Failed(
+                "the chosen archive could not be copied into the app".to_owned(),
+            ))
+        }
+    }
 }
 
 /// Launcher and app-switcher icon hook for `vera20k::util::app_icon`.
@@ -89,7 +117,8 @@ fn apply_app_icon(vera_icon: bool) {
 /// back through [`Java_org_vera20k_VeraActivity_nativeOnLanNetworkChanged`].
 fn bind_lan_network() {
     let bound = with_activity(|env, activity| {
-        env.call_method(activity, "bindLanNetwork", "()V", &[]).is_ok()
+        env.call_method(activity, "bindLanNetwork", "()V", &[])
+            .is_ok()
     });
     if bound != Some(true) {
         log::warn!("Could not bind the LAN visit to the Wi-Fi network");

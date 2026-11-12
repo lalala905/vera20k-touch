@@ -1,6 +1,7 @@
 package org.vera20k
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.app.ActivityManager.TaskDescription
 import android.app.NativeActivity
 import android.content.ComponentName
@@ -37,6 +38,9 @@ class VeraActivity : NativeActivity() {
     private companion object {
         /** Unique within this activity; "VR" in ASCII. */
         const val REQUEST_PICK_FOLDER = 0x5652
+
+        /** The same, for a ZIP of the installation instead of a tree. */
+        const val REQUEST_PICK_ZIP = 0x565A
 
         /** A retail installation is about 1.5 GB; leave headroom for the copy. */
         const val REQUIRED_BYTES = 1700L shl 20
@@ -100,11 +104,23 @@ class VeraActivity : NativeActivity() {
     }
 
     /**
-     * Opens the system folder picker. Called from Rust on the UI thread
+     * Asks how the player wants to supply the installation — a folder or a ZIP
+     * — and opens that picker. Called from Rust on the UI thread
      * (`ui::asset_import::choose_folder`); the result arrives in
      * [onActivityResult].
      */
     fun startFolderPicker() {
+        AlertDialog.Builder(this)
+            .setTitle("Import game files")
+            .setMessage("Choose the installation folder, or a ZIP of it.")
+            .setPositiveButton("Folder") { _, _ -> openFolderPicker() }
+            .setNegativeButton("ZIP file") { _, _ -> openZipPicker() }
+            .setNeutralButton("Cancel", null)
+            .show()
+    }
+
+    /** The system folder picker for a Storage Access Framework tree. */
+    private fun openFolderPicker() {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
             // Keep the grant across the copy: the engine reads the tree for as
             // long as the import runs, and the copy may outlive this task.
@@ -114,6 +130,18 @@ class VeraActivity : NativeActivity() {
             )
         }
         startActivityForResult(intent, REQUEST_PICK_FOLDER)
+    }
+
+    /** The system document picker, for one ZIP the player owns. */
+    private fun openZipPicker() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            // Providers disagree about a ZIP's MIME type; the extractor, not
+            // the picker, decides whether the file is an archive.
+            type = "*/*"
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        startActivityForResult(intent, REQUEST_PICK_ZIP)
     }
 
     /**
@@ -138,15 +166,53 @@ class VeraActivity : NativeActivity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != REQUEST_PICK_FOLDER) return
-        val tree = if (resultCode == Activity.RESULT_OK) data?.data else null
-        // An empty string, not null: the native side reads it as "cancelled"
-        // without needing a second callback shape.
-        nativeOnFolderPicked(tree?.toString() ?: "")
+        when (requestCode) {
+            REQUEST_PICK_FOLDER -> {
+                val tree = if (resultCode == Activity.RESULT_OK) data?.data else null
+                // An empty string, not null: the native side reads it as
+                // "cancelled" without needing a second callback shape.
+                nativeOnFolderPicked(tree?.toString() ?: "")
+            }
+            REQUEST_PICK_ZIP -> {
+                val zip = if (resultCode == Activity.RESULT_OK) data?.data else null
+                if (zip != null) copyZipAndImport(zip)
+            }
+        }
+    }
+
+    /**
+     * Copies the picked document into the cache and hands its path to Rust,
+     * which unpacks it: a `content://` URI has no path the extractor can open,
+     * and the archive is deleted once its files are out.
+     */
+    private fun copyZipAndImport(uri: Uri) {
+        val target = File(cacheDir, "game-import-" + System.nanoTime() + ".zip")
+        val worker = Thread {
+            val copied = try {
+                contentResolver.openInputStream(uri)?.use { source ->
+                    target.outputStream().use { sink -> source.copyTo(sink) }
+                } != null
+            } catch (_: Throwable) {
+                false
+            }
+            if (!copied) target.delete()
+            // An empty path reports the copy failure; the extractor would
+            // otherwise read a truncated archive and blame the ZIP.
+            nativeOnZipPicked(if (copied) target.absolutePath else "")
+        }
+        try {
+            worker.start()
+        } catch (_: Throwable) {
+            target.delete()
+            nativeOnZipPicked("")
+        }
     }
 
     /** Implemented in `android/src/lib.rs`; the import flow's entry. */
     private external fun nativeOnFolderPicked(treeUri: String)
+
+    /** Implemented in `android/src/lib.rs`; the picked ZIP's copied path. */
+    private external fun nativeOnZipPicked(zipPath: String)
 
     /** Implemented in `android/src/lib.rs`; reports the copy's outcome. */
     private external fun nativeImportFinished(result: String)

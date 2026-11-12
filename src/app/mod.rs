@@ -67,6 +67,7 @@ pub(crate) mod display_target;
 mod frame;
 pub mod frontend;
 mod game_data_check;
+pub mod game_import;
 mod handler;
 mod hidden_run;
 mod in_game;

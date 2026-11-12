@@ -3120,6 +3120,7 @@ dependencies = [
  "libc",
  "log",
  "mimalloc",
+ "miniz_oxide",
  "naga",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",

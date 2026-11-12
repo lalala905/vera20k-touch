@@ -39,7 +39,8 @@ the same folder and still owns `config.toml` when it runs.
 ## Building
 
 Prerequisites: `platforms;android-36`, `build-tools;36.1.0`, `ndk;28.2.13676358`,
-`cargo-ndk`, a JDK 17+ that `JAVA_HOME` and `PATH` agree on. The Gradle wrapper
+`cargo-ndk`, a JDK 17 to 23 that `JAVA_HOME` and `PATH` agree on (Gradle
+8.13 rejects the JDK 25 the current Android Studio bundles). The Gradle wrapper
 is committed, so no separate Gradle install is needed — the first `gradlew` run
 downloads the distribution it pins. Android Studio writes
 `android/gradle/gradle-daemon-jvm.properties` (which pins the daemon to the
@@ -79,6 +80,40 @@ and add `-t x86_64` when you need it. Drop it for releases. On macOS/Linux, use
 `mkdir -p android/.android`, forward-slash paths, a shell environment assignment
 for `CARGO_PROFILE_SHIPPING_STRIP`, and
 `./android/gradlew -p android :app:assembleDebug`.
+
+## Release signing
+
+`assembleRelease` signs with a machine-local keystore; with none configured the
+APK stays unsigned and `adb install` rejects it. The keystore and its passwords
+stay out of Git: the file is `android/vera-release.jks` (git-ignored), the values
+are in `android/local.properties` (git-ignored), or the `VERA_KEYSTORE`,
+`VERA_KEYSTORE_PASSWORD`, `VERA_KEY_ALIAS` and `VERA_KEY_PASSWORD` environment
+variables on CI. `app/build.gradle.kts` reads both.
+
+```bash
+keytool -genkeypair -keystore android/vera-release.jks -alias vera20k \
+  -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=VERA20k, O=VERA20k, C=CN"
+```
+
+```properties
+vera.keystore=vera-release.jks
+vera.keystore.password=...
+vera.key.alias=vera20k
+vera.key.password=...
+```
+
+Package, then check what a store and a device check:
+
+```bash
+./android/gradlew -p android :app:assembleRelease   # :app:bundleRelease for Play
+apksigner verify --print-certs android/app/build/outputs/apk/release/app-release.apk
+zipalign -c -P 16 4 android/app/build/outputs/apk/release/app-release.apk
+```
+
+`veraVersionCode` in `app/build.gradle.kts` is bumped by hand for each upload;
+the version name still comes from `Cargo.toml`. A release-signed APK cannot
+upgrade a debug-signed install — the signatures differ, so uninstall first, and
+that also removes the imported game files.
 
 ## Launcher icon
 
@@ -199,6 +234,14 @@ A guest also needs the host's map in its own map library.
   splash.
 - **System folder picker.** The importer requests read access to the selected
   tree and writes only to app-private storage. It needs no all-files permission.
+- **Folders or a ZIP.** The import button asks how the installation arrives: a
+  folder, copied through the Storage Access Framework as above, or a ZIP of it.
+  For a ZIP the activity copies the chosen document into its cache and reports
+  the path, since a `content://` URI has no path the extractor can open;
+  `app::game_import` unpacks it into the same game folder, keeps only the
+  shallowest folder holding `ra2md.mix` and `ra2.mix`, and points `config.toml`
+  at it through the config owner. The reader refuses ZIP64, encrypted entries,
+  symbolic links and member paths that would escape the extraction root.
 - **Import before switching installations.** Each copy goes into a new
   app-private directory. Only a successful copy updates the game path through
   the Rust configuration owner, preserving other settings and the previous
@@ -210,10 +253,11 @@ Run the import regression tests with `./android/gradlew -p android :app:testDebu
 
 ## What is still open
 
-1. **Release validation.** The recipe uses `--profile shipping` and strips
-   symbols, but the contributor's earlier device results were from a debug APK.
-   Rebuild the current code, inspect ELF/APK alignment and signing, and repeat
-   device testing before treating it as a release.
+1. **Release validation.** Signing and packaging are in place:
+   `assembleRelease` signs with `android/vera-release.jks`, and the APK verifies
+   with a v2 signature and 16 KB-aligned native libraries. What remains is device
+   testing of a `--profile shipping`, `--no-default-features` APK: the earlier
+   hardware results came from a debug build.
 2. **Live import progress.** The dialog shows the copy's step and the folder it
    landed in, and the copy refuses a folder without `ra2md.mix`/`ra2.mix` before
    touching anything, but the byte counter is wired and unexercised: the copy

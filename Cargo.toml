@@ -113,6 +113,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+miniz_oxide = "0.8"
 log = { workspace = true }
 
 # --- UI text ---
