@@ -230,6 +230,9 @@ struct CardLayout {
     title_cap: f32,
     body_cap: f32,
     small_cap: f32,
+    /// The base size of a button's label; the label is fitted below it when
+    /// the three buttons' words are wider than the panel.
+    button_cap: f32,
     button_w: i32,
     button_h: i32,
     button_y: i32,
@@ -244,7 +247,9 @@ impl CardLayout {
         let scale = (height as f32 / 480.0).max(1.0);
         let px = |value: f32| (value * scale).round() as i32;
         let margin = px(12.0).max(2);
-        let button_h = px(26.0).max(12);
+        // A hand-held screen's buttons are the whole interface: tall enough to
+        // hold a fingertip and wide enough for the three import labels.
+        let button_h = px(36.0).max(16);
         Self {
             scale,
             width,
@@ -256,7 +261,8 @@ impl CardLayout {
             title_cap: (18.0 * scale).round().max(9.0),
             body_cap: (10.0 * scale).round().max(7.0),
             small_cap: (9.0 * scale).round().max(6.0),
-            button_w: px(118.0).max(48),
+            button_cap: (14.0 * scale).round().max(9.0),
+            button_w: px(170.0).max(56),
             button_h,
             button_y: height - margin - px(22.0) - button_h,
         }
@@ -675,12 +681,13 @@ pub(crate) fn render(
             }
         }
 
-        // Button labels, centred in their panels, at the body size or the
+        // Button labels, centred in their panels, at the button size or the
         // largest whole scale under it at which they all fit: a heading-sized
         // label overruns its button. One too long even at 1:1 squeezes as the
         // menus' labels do.
         let room = layout.button_w as f32 - 8.0 * layout.scale;
-        let face = body.fitting(font, &labels, room);
+        let button_face = CardType::new(layout.button_cap, gap_for(layout.button_cap));
+        let face = button_face.fitting(font, &labels, room);
         for (rect, label) in button_rects.iter().zip(&labels) {
             let fit = font.fit_line(label, (room / face.scale) as u32);
             font.fitted(fit, |font| {
