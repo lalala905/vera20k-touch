@@ -52,6 +52,10 @@ mod player_scatter_tests;
 #[path = "mcv_group_tests.rs"]
 mod mcv_group_tests;
 
+#[cfg(test)]
+#[path = "touch_reselect_tests.rs"]
+mod touch_reselect_tests;
+
 /// Handle mouse button press/release for selection and move commands.
 ///
 /// The in-game gadget walk runs FIRST (study G22/A8): chrome buttons + cameos
@@ -493,6 +497,83 @@ fn left_up_branches(state: &mut AppState, click: LeftUp) {
     }
 }
 
+/// VERA-only touch mapping: does this tap land on a unit the current
+/// multi-unit selection already holds? The native multi-select click orders
+/// the other members to move near the tapped one; a finger on a phone means
+/// "just this one", so the release skips that context route and is left to
+/// the selection owner's own click snapshot, which clears and selects it. A
+/// single-unit selection keeps every native answer (self-deploy included),
+/// and mouse input is unchanged.
+fn touch_reselects_selected_unit(state: &AppState, action: SelectAction) -> bool {
+    let SelectAction::Click(sx, sy) = action else {
+        return false;
+    };
+    if !state.match_state.input.cursor_from_touch {
+        return false;
+    }
+    let Some(sim) = state
+        .match_state
+        .sim_runtime
+        .runtime()
+        .map(|rt| &rt.simulation)
+    else {
+        return false;
+    };
+    let current = selected_stable_ids_in_order(
+        Some(sim),
+        state.rules(),
+        &state.match_state.input.selection_order,
+        state.match_state.input.selection_order_pending,
+    );
+    if current.len() < 2 {
+        return false;
+    }
+    let Some(owner) = preferred_local_owner_name(state) else {
+        return false;
+    };
+    let zoom = state.match_state.input.zoom_level;
+    let world_x = sx / zoom + state.match_state.input.camera_x;
+    let world_y = sy / zoom + state.match_state.input.camera_y;
+    let order = crate::app::presentation::instances::tactical_entity_encounter_order(sim);
+    let fog = (!state.match_state.sandbox_full_visibility).then_some(sim.fog());
+    let picked = pick_entity_at_point(
+        crate::app::input::entity_pick::presented(state, sim),
+        &order,
+        fog,
+        Some(owner.as_str()),
+        world_x,
+        world_y,
+        Some(sim.interner()),
+        sim.resolved_terrain(),
+    );
+    touch_reselects_selected_unit_parts(&current, picked, sim, &owner)
+}
+
+/// The decision half of [`touch_reselects_selected_unit`], kept free of app
+/// state so its boundaries are testable: the unit must be picked, part of a
+/// multi-unit selection, not a structure, and the player's own.
+fn touch_reselects_selected_unit_parts(
+    current: &[u64],
+    picked: Option<u64>,
+    sim: &crate::sim::world::Simulation,
+    owner: &str,
+) -> bool {
+    let Some(id) = picked else {
+        return false;
+    };
+    if current.len() < 2 || !current.contains(&id) {
+        return false;
+    }
+    let Some(entity) = sim.entities().get(id) else {
+        return false;
+    };
+    entity.category() != EntityCategory::Structure
+        && sim
+            .interner()
+            .resolve(entity.owner())
+            .eq_ignore_ascii_case(owner)
+}
+
 /// The tactical release past the placement branch: the superweapon's
 /// SPECIAL_PLACE, a planning node's connection, the band box and the click.
 fn tactical_left_up(state: &mut AppState) {
@@ -627,19 +708,26 @@ fn tactical_left_up(state: &mut AppState) {
     // selection/toggle. Ground move, attack, and every other
     // context action keep their ordinary priority while T is held.
     let type_select_held = state.match_state.input.type_select.held();
-    if matches!(
-        route_click_action_before_type_select(
-            action,
-            left_click_can_issue_orders(state),
-            |sx, sy| {
-                // A resolved context dispatch consumes the click
-                // even when its receiver admits no command.
-                try_queue_context_order(state, ContextOrderTarget::ScreenPoint(sx, sy), true)
-                    .then_some(())
-            },
-        ),
-        ClickActionRoute::ContextOrder(())
-    ) {
+    // VERA-only touch mapping: tapping a unit that is already part of a
+    // multi-unit selection makes it the selection, instead of ordering the
+    // rest of the group to move to it (the native multi-select click). The
+    // selection owner's own click snapshot clears and selects it.
+    let touch_reselect = touch_reselects_selected_unit(state, action);
+    if !touch_reselect
+        && matches!(
+            route_click_action_before_type_select(
+                action,
+                left_click_can_issue_orders(state),
+                |sx, sy| {
+                    // A resolved context dispatch consumes the click
+                    // even when its receiver admits no command.
+                    try_queue_context_order(state, ContextOrderTarget::ScreenPoint(sx, sy), true)
+                        .then_some(())
+                },
+            ),
+            ClickActionRoute::ContextOrder(())
+        )
+    {
         return;
     }
     let mut queued_selection: Option<SelectionMutation> = None;

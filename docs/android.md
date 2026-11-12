@@ -179,7 +179,9 @@ A guest also needs the host's map in its own map library.
 - **Touch follows Rusted Warfare.** A tap clicks, a one-finger battlefield drag
   pans the camera with the map under the finger, a two-finger drag draws the
   select box over the rectangle they span, a two-finger tap cancels the
-  selection, and a long still touch is the right click. `mouse.shp` stays
+  selection, and a long still touch is the right click. A tap on a unit the
+  current multi-unit selection already holds makes it the whole selection, where
+  the native multi-select click orders the group to move near it. `mouse.shp` stays
   hidden while a finger drives the pointer; the synthetic cursor still feeds
   every hit test. The system Back button arrives as `BrowserBack`, which the
   handler rewrites to Escape so the pause menu and confirmation pages are
