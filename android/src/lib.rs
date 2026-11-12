@@ -273,7 +273,7 @@ pub extern "system" fn Java_org_vera20k_VeraActivity_nativeOnLanNetworkChanged(
     vera20k::util::lan_network::note_changed();
 }
 
-/// Bind `nativeOnFolderPicked` to this activity's class.
+/// Bind the activity's native entry points to this activity's class.
 ///
 /// Registered from `android_main`, not `JNI_OnLoad`: `FindClass` on the loading
 /// thread uses the system class loader and cannot see `org.vera20k.VeraActivity`,
@@ -311,6 +311,11 @@ fn register_folder_picker_native() -> bool {
                 sig: "(Ljava/lang/String;)Ljava/lang/String;".into(),
                 fn_ptr: Java_org_vera20k_VeraActivity_nativeConfigForImport
                     as *mut std::ffi::c_void,
+            },
+            jni::NativeMethod {
+                name: "nativeOnZipPicked".into(),
+                sig: "(Ljava/lang/String;)V".into(),
+                fn_ptr: Java_org_vera20k_VeraActivity_nativeOnZipPicked as *mut std::ffi::c_void,
             },
             jni::NativeMethod {
                 name: "nativeOnLanNetworkChanged".into(),
