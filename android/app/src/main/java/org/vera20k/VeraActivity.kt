@@ -110,6 +110,14 @@ class VeraActivity : NativeActivity() {
      * [onActivityResult].
      */
     fun startFolderPicker() {
+        // JNI reaches this from the game's own thread, not Android's UI thread:
+        // a dialog (and an activity result request) must be built there, or the
+        // platform throws and the card reports that this build has no picker.
+        runOnUiThread { showImportSourceChooser() }
+    }
+
+    /** Asks the player which form the installation arrives in. */
+    private fun showImportSourceChooser() {
         AlertDialog.Builder(this)
             .setTitle("Import game files")
             .setMessage("Choose the installation folder, or a ZIP of it.")
