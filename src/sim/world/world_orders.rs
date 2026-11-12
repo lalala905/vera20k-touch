@@ -94,6 +94,12 @@ pub enum EntryClickAction {
     Grind,
     /// Action 0x1F.
     NoEnter,
+    /// Action 0x11, a Carryall over a Unit it may lift
+    /// (`aircraft::carryall`).
+    Tote,
+    /// Action 0, which orders nothing: a Carryall's Tote over a Unit still
+    /// in its war factory (`0x00417E7D..0x00417EF3`).
+    Nothing,
 }
 
 /// The base action (`TechnoClass::What_Action_OnObject`) the entry rows
@@ -134,25 +140,29 @@ impl Simulation {
         let Some(actor) = self.substrate.entities.get(actor_id) else {
             return Ok(VehicleCaptureOutcome::default());
         };
-        if actor.category() != EntityCategory::Infantry
-            || !self.entity_object_type(actor, rules).is_some_and(|ty| {
-                #[cfg(not(feature = "ares"))]
-                {
-                    ty.thief
-                }
-                // Ares 3.0 InfantryClass_UpdateVehicleThief_Check (10049970,
-                // hook 0x5202F9): VehicleThief (+EC6) or CanDrive.
-                #[cfg(feature = "ares")]
-                {
-                    ty.vehicle_thief || ty.driver_rules().can_drive()
-                }
-            })
-        {
+        if actor.category() != EntityCategory::Infantry {
             return Ok(VehicleCaptureOutcome::default());
         }
+        // The NavCom is read before the type only to spare an infantryman
+        // that is not walking to an object the type lookup; neither test
+        // writes (VERA-only order).
         let Some(nav @ NavTargetRef::Object { id: target_id }) = actor.navigation.nav_com() else {
             return Ok(VehicleCaptureOutcome::default());
         };
+        if !self.entity_object_type(actor, rules).is_some_and(|ty| {
+            #[cfg(not(feature = "ares"))]
+            {
+                ty.thief
+            }
+            // Ares 3.0 InfantryClass_UpdateVehicleThief_Check (10049970,
+            // hook 0x5202F9): VehicleThief (+EC6) or CanDrive.
+            #[cfg(feature = "ares")]
+            {
+                ty.vehicle_thief || ty.driver_rules().can_drive()
+            }
+        }) {
+            return Ok(VehicleCaptureOutcome::default());
+        }
         let Some(target) = self.substrate.entities.get(target_id) else {
             return Ok(VehicleCaptureOutcome::default());
         };
@@ -367,16 +377,23 @@ impl Simulation {
     /// though Unit's healer arm `0x0073FD7C` still answers Repair). The event
     /// queues the mission and sets the target, which the next frozen AI frame
     /// drops (`Simulation::temporal_ai_prologue`); the queued mission waits.
-    pub fn click_order_receivers(&self, selection: &[u64]) -> Vec<u64> {
+    ///
+    /// With `ares` a Deactivated (`+0x1C8`) object is refused as well: Foot
+    /// ClickedAction_Object and _Cell (hooks `0x004D74EC`, `0x004D7D58`;
+    /// Ares.dll `1004CBC0`, `1004CBA0`), Building Active_Click_With_Cell
+    /// (`0x004436F7`, `1004CB30`) and Building ClickedAction_Object's
+    /// Deactivated arm (`0x00443414`, `10016F60`), which consumes the click.
+    /// The one action they let through, Detonate, is sent by the self-click
+    /// producer, which reads the whole selection.
+    /// `ares` is [`RuleSet::ares`](crate::rules::ruleset::RuleSet::ares).
+    pub fn click_order_receivers(&self, selection: &[u64], ares: bool) -> Vec<u64> {
         selection
             .iter()
             .copied()
             .filter(|&id| {
-                !self
-                    .substrate
-                    .entities
-                    .get(id)
-                    .is_some_and(|entity| entity.berserk.is_active())
+                !self.substrate.entities.get(id).is_some_and(|entity| {
+                    entity.berserk.is_active() || (ares && entity.deactivated.is_offline())
+                })
             })
             .collect()
     }
@@ -532,6 +549,12 @@ impl Simulation {
     ///   both ([`Self::engineer_building_action`]); its other building rows
     ///   have their own owners.
     /// - The passenger rows: [`Self::passenger_click_action`].
+    /// - A Carryall's Tote rung ([`Self::carryall_tote_action`]) runs for base
+    ///   action Select over an allied Unit; Aircraft ClickedAction
+    ///   (`0x00417BD0`) sends Tote as Move with the Unit as destination.
+    ///   RESIDUAL: the rung also runs for base action 0, which
+    ///   [`EntryBaseAction`] does not tell apart from the others; an
+    ///   Aircraft over an allied Unit answers Select.
     /// - An Aircraft's depot row (`0x00417DF6..0x00417E78`) runs for a human
     ///   player's (House `0x0050B6F0`) base action Select over a `UnitRepair=`
     ///   building (`+0x16A9`) and answers NoEnter; Aircraft ClickedAction
@@ -604,6 +627,17 @@ impl Simulation {
                 })
             }
             EntityCategory::Aircraft => {
+                // The Tote rung (`0x00417D06..0x00417D75`) for base Select.
+                if select && let Some(tote) = self.carryall_tote_action(actor_id, target_id, rules)
+                {
+                    use crate::sim::aircraft::carryall::CarryallTote;
+                    return match tote {
+                        CarryallTote::Tote => Some(EntryClickAction::Tote),
+                        CarryallTote::Nothing => Some(EntryClickAction::Nothing),
+                        #[cfg(feature = "ares")]
+                        CarryallTote::Kept => None,
+                    };
+                }
                 let target_obj = self.object_type(target.type_ref(), rules)?;
                 if !select
                     || !self.house_is_human_player(actor.owner())
@@ -1390,7 +1424,13 @@ impl Simulation {
     /// (`0x004483C0..0x0044848F`), run before the owner swap because native
     /// reads `this->Owner` (the OLD owner) there. The engineer capture site
     /// (`InfantryClass::PerCellProcess 0x00519F79 PUSH 1`) passes
-    /// announce=true. Native gates: the old or the new owner is the local
+    /// announce=true, and so do mind control's two (`CaptureManagerClass::
+    /// CaptureUnit 0x00471DAE`, `FreeUnit 0x004720D5`) and the unported
+    /// infantry takeover of a 1x1 `UndeploysInto=` building (`0x00519A27`,
+    /// see `infantry_per_cell_process`). The remaining callers that can reach
+    /// a building pass 0 (abandon `0x004582E6`/`0x00458316`, house transfer
+    /// `0x0050D2A3`/`0x0050D2F0`, trigger actions `0x006E0B33`/`0x006E0C03`/
+    /// `0x006E0C6A`). Native gates: the old or the new owner is the local
     /// player (`0x004483C6`/`0x004483D1 CALL 0x0050B6F0`) and the new
     /// owner's type is not `MultiplayPassive` (`0x004483E1 HouseType+0x1A6`).
     /// The sim has no local player, so it pre-filters on a human-controlled
@@ -1404,7 +1444,7 @@ impl Simulation {
     /// dedupe, so on stock data the radar accepts every capture. The type's
     /// `CaptureEvaEvent=` (`Type+0x1554`, `0x00448443..0x00448459`) rides
     /// along for the app's local-new-owner branch.
-    pub(crate) fn announce_engineer_capture(
+    pub(crate) fn announce_building_capture(
         &mut self,
         building_id: u64,
         new_owner: InternedId,
@@ -1812,7 +1852,7 @@ impl Simulation {
                     .get(engineer_id)
                     .map(|engineer| engineer.owner())
                 {
-                    self.announce_engineer_capture(building_id, capture_owner, rules);
+                    self.announce_building_capture(building_id, capture_owner, rules);
                     self.change_owner_with_rules(
                         building_id,
                         capture_owner,

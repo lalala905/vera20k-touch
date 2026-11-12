@@ -35,7 +35,6 @@ pub(crate) enum ObjectTexture {
     CombatLight(usize),
     /// Initial Building Extras status, sharing the late run's instance range.
     Status(usize),
-    OverlayAtlas,
     /// Per-piece native destination edit; never a texture-only coalesced draw.
     TerrainShp(crate::render::terrain_draw::TerrainPiece),
     /// An atlas SHP whose source mask performs a native destination edit.
@@ -143,6 +142,9 @@ pub(crate) enum ObjectExtrasRun {
         parent: DrawId,
         bomb_clock: Option<u32>,
         wrench: Option<u32>,
+        /// Ares POWEROFF marker (10049FE0), after the wrench.
+        #[cfg(feature = "ares")]
+        power_off: Option<u32>,
         rank: Option<u32>,
         background: Option<u32>,
         shield_background: Option<u32>,
@@ -366,6 +368,12 @@ pub(crate) fn lower_object_instances(entries: Vec<PlannedObjectInstance>) -> [Ob
                     lowered.extras_instances.push(instance);
                     index
                 });
+                #[cfg(feature = "ares")]
+                let power_off = strip.power_off.map(|instance| {
+                    let index = lowered.extras_instances.len() as u32;
+                    lowered.extras_instances.push(instance);
+                    index
+                });
                 let rank = strip.rank.map(|instance| {
                     let index = lowered.extras_instances.len() as u32;
                     lowered.extras_instances.push(instance);
@@ -424,6 +432,8 @@ pub(crate) fn lower_object_instances(entries: Vec<PlannedObjectInstance>) -> [Ob
                     parent: owner,
                     bomb_clock,
                     wrench,
+                    #[cfg(feature = "ares")]
+                    power_off,
                     rank,
                     background,
                     shield_background,
@@ -445,11 +455,19 @@ pub(crate) fn lower_object_instances(entries: Vec<PlannedObjectInstance>) -> [Ob
                 if let Some(ObjectExtrasRun::Status {
                     bomb_clock,
                     wrench,
+                    #[cfg(feature = "ares")]
+                    power_off,
                     rank,
                     fills,
                     ..
                 }) = &strip
-                    && (bomb_clock.is_some() || wrench.is_some() || rank.is_some())
+                    && (bomb_clock.is_some() || wrench.is_some() || rank.is_some() || {
+                        #[cfg(feature = "ares")]
+                        let marker = power_off.is_some();
+                        #[cfg(not(feature = "ares"))]
+                        let marker = false;
+                        marker
+                    })
                 {
                     split_prefix = Some(lowered.extras_runs.len());
                     lowered.extras_runs.push(ObjectExtrasRun::Status {
@@ -457,6 +475,8 @@ pub(crate) fn lower_object_instances(entries: Vec<PlannedObjectInstance>) -> [Ob
                         parent: owner,
                         bomb_clock: *bomb_clock,
                         wrench: *wrench,
+                        #[cfg(feature = "ares")]
+                        power_off: *power_off,
                         rank: *rank,
                         background: None,
                         shield_background: None,
@@ -514,6 +534,8 @@ pub(crate) fn lower_object_instances(entries: Vec<PlannedObjectInstance>) -> [Ob
             if let Some(ObjectExtrasRun::Status {
                 bomb_clock,
                 wrench,
+                #[cfg(feature = "ares")]
+                power_off,
                 rank,
                 background,
                 shield_background,
@@ -530,9 +552,16 @@ pub(crate) fn lower_object_instances(entries: Vec<PlannedObjectInstance>) -> [Ob
             {
                 let bomb_clock = bomb_clock.filter(|_| split_prefix.is_none());
                 let wrench = wrench.filter(|_| split_prefix.is_none());
+                #[cfg(feature = "ares")]
+                let power_off = power_off.filter(|_| split_prefix.is_none());
+                #[cfg(feature = "ares")]
+                let marker = power_off.is_some();
+                #[cfg(not(feature = "ares"))]
+                let marker = false;
                 let rank = rank.filter(|_| split_prefix.is_none());
                 if bomb_clock.is_some()
                     || wrench.is_some()
+                    || marker
                     || rank.is_some()
                     || background.is_some()
                     || shield_background.is_some()
@@ -556,6 +585,8 @@ pub(crate) fn lower_object_instances(entries: Vec<PlannedObjectInstance>) -> [Ob
                         parent: owner,
                         bomb_clock,
                         wrench,
+                        #[cfg(feature = "ares")]
+                        power_off,
                         rank,
                         background,
                         shield_background,
@@ -792,7 +823,7 @@ mod tests {
                     policy: BlitPolicy::z_read(SpriteEncoding::Rle),
                 },
                 vec![ObjectPieceInstance {
-                    target: ObjectTexture::OverlayAtlas,
+                    target: ObjectTexture::ShpPage(0),
                     render_z: RenderZPolicy::ReadOnly,
                     instance: SpriteInstance::default(),
                 }],
@@ -848,7 +879,7 @@ mod tests {
         };
         let parent = |id, display_order, tail_draws: Vec<SurfaceDraw>| {
             let piece = || ObjectPieceInstance {
-                target: ObjectTexture::OverlayAtlas,
+                target: ObjectTexture::ShpPage(0),
                 render_z: RenderZPolicy::ReadOnly,
                 instance: SpriteInstance::default(),
             };
@@ -876,9 +907,9 @@ mod tests {
                 .map(|run| (run.target, run.start, run.count))
                 .collect::<Vec<_>>(),
             [
-                (ObjectTexture::OverlayAtlas, 0, 2),
+                (ObjectTexture::ShpPage(0), 0, 2),
                 (ObjectTexture::SurfaceLines(0), 2, 0),
-                (ObjectTexture::OverlayAtlas, 2, 2),
+                (ObjectTexture::ShpPage(0), 2, 2),
             ]
         );
     }
@@ -906,7 +937,7 @@ mod tests {
                 kind: BuildingPieceKind::Body,
                 z_bias: 0,
                 policy: BlitPolicy::z_read(SpriteEncoding::Rle),
-                target: ObjectTexture::OverlayAtlas,
+                target: ObjectTexture::ShpPage(0),
                 instance: SpriteInstance::default(),
             }],
         );
@@ -959,7 +990,7 @@ mod tests {
                 .iter()
                 .map(|run| run.target)
                 .collect::<Vec<_>>(),
-            [ObjectTexture::OverlayAtlas]
+            [ObjectTexture::ShpPage(0)]
         );
     }
 
@@ -1421,7 +1452,7 @@ mod tests {
         let pass = lower_ground_object_instances(vec![
             PlannedObjectInstance::object(
                 order.object_draw(10, SpriteEncoding::Terrain).unwrap(),
-                vec![marked_piece(ObjectTexture::OverlayAtlas, 10)],
+                vec![marked_piece(ObjectTexture::ShpPage(1), 10)],
             ),
             building,
             PlannedObjectInstance::object(
@@ -1433,7 +1464,7 @@ mod tests {
         assert_eq!(pass.owners, [20, 30, 10]);
         assert_eq!(
             pass.runs.iter().map(|run| run.target).collect::<Vec<_>>(),
-            [ObjectTexture::UnitAtlasPage(9), ObjectTexture::OverlayAtlas,]
+            [ObjectTexture::UnitAtlasPage(9), ObjectTexture::ShpPage(1),]
         );
         assert_eq!(
             pass.building_base_runs
@@ -1481,7 +1512,7 @@ mod tests {
             ),
             PlannedObjectInstance::object(
                 plain_parent(&order, 1),
-                vec![marked_piece(ObjectTexture::OverlayAtlas, 1)],
+                vec![marked_piece(ObjectTexture::ShpPage(2), 1)],
             ),
         ]);
 

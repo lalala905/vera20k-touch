@@ -298,7 +298,7 @@ pub(crate) fn render_multiplayer_setup(
                     rect,
                     swatch: selected
                         .and_then(|item| item.swatch)
-                        .map(|index| house_color_tint(&[], index)),
+                        .map(|index| house_color_tint(state.rules(), index)),
                     open: ui.popup.control == Some(combo.id),
                     disabled: !view.enabled(combo.id),
                 },
@@ -598,7 +598,7 @@ pub(crate) fn render_multiplayer_setup(
                     scale.derive_rect(popup.row_rect(index)?, |row| {
                         RectPx::new(row.x + 2, row.y + 2, row.w - 4, 19)
                     }),
-                    house_color_tint(&[], combo.choices.get(index)?.swatch?),
+                    house_color_tint(state.rules(), combo.choices.get(index)?.swatch?),
                 ))
             });
             push_popup_instances(
@@ -962,9 +962,22 @@ fn push_trackbar(
         scale,
     );
     if bar.id != DIFFICULTY {
+        let value = match bar.id {
+            SPEED => {
+                let context = crate::ui::shell::game_speed::SpeedContext::Network;
+                context.value_text(context.stored_speed(bar.value))
+            }
+            CREDITS => state
+                .frontend
+                .skirmish_shell_state
+                .trackbar_bounds
+                .credits_from_visual_position(bar.value)
+                .to_string(),
+            _ => bar.range.stepped(bar.value).to_string(),
+        };
         texts.push(shell_text::draw_in_rect_scaled(
             &state.renderer.bit_font,
-            &bar.range.stepped(bar.value).to_string(),
+            &value,
             rect_to_text_rect(crate::ui::shell::trackbar::value_text_rect(rect, scale)),
             if view.enabled(bar.id) {
                 SHELL_LABEL_TEXT_RGB

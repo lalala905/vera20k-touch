@@ -7,7 +7,8 @@
 //! `GameLobbyBase.WriteSpawnIni` and `CampaignSelector.LaunchMission`:
 //! https://github.com/CnCNet/xna-cncnet-client/tree/develop/DXMainClient/DXGUI
 //!
-//! This boundary admits one local human, the stock YR modes and stock YR
+//! This boundary admits one local human in any row of the MPModesMD.ini the
+//! game loaded, network launches in the stock YR modes, and stock YR
 //! campaigns. Ares builds also carry allocated custom Country identities
 //! into Battle startup. External campaigns pass an explicit Scenario independently
 //! of record0. Multiplayer files (`PlayerCount>1` or `[Relay]`, docs/spawn.md)
@@ -21,13 +22,14 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 
 use crate::rules::ini_parser::{IniFile, IniSection};
+use crate::sim::game_options::is_selectable_game_speed;
 use crate::skirmish_launch::{
     AiDifficulty, LaunchCountry, LaunchHumanRole, LaunchStartPosition, LaunchTeam,
     NETWORK_PLAYER_SLOT_COUNT, PreFillHouseRoster, SKIRMISH_PLAYER_SLOT_COUNT, SkirmishAiSlot,
     SkirmishHumanSlot, SkirmishLaunchMode, SkirmishLaunchOptions, SkirmishLaunchSession,
     SkirmishLocalSlot,
 };
-use crate::skirmish_modes::ModeStartEffect;
+use crate::skirmish_modes::{ModeStartEffect, SkirmishGameMode, mode_by_id};
 
 #[derive(Debug)]
 pub(crate) struct SpawnRequest {
@@ -37,6 +39,9 @@ pub(crate) struct SpawnRequest {
     /// *(VERA)* Optional `[Settings] Expected*` values a launcher read from
     /// `vera20k --probe`; the launch is rejected at start when they differ.
     pub(crate) expected: SpawnExpectations,
+    /// The launch file, read again once the mode roster is loaded
+    /// ([`SpawnRequest::admit_loaded_modes`]).
+    text: String,
 }
 
 /// The stock Battle row, `GameMode`'s default; `--probe` digests the rules
@@ -45,20 +50,22 @@ pub(crate) fn spawn_battle_mode() -> SkirmishLaunchMode {
     SkirmishLaunchMode::stock(crate::skirmish_launch::BATTLE_MODE_ID).expect("stock Battle row")
 }
 
-/// The stock rows a spawn may select. A Cooperative launch is one mission: it
+/// The stock rows a network spawn may select. A Cooperative launch is one mission: it
 /// holds no campaign progress record for its Start (`0x005C1D80`) to bind, so
 /// `+0xA0` (`0x005C3710`) records nothing and no next mission follows.
 pub(crate) fn spawn_modes() -> impl Iterator<Item = SkirmishLaunchMode> {
     (1..=9).filter_map(SkirmishLaunchMode::stock)
 }
 
-/// `[Settings] GameMode`. The launcher owns which maps a mode may use: the file
-/// names one fixed map, so `IsValidMap` (`0x005D63E0`) has no list to filter.
-fn spawn_mode(settings: &IniSection) -> Result<SkirmishLaunchMode> {
+/// One MPModesMD.ini row by id, or none.
+type ModeRow<'a> = &'a dyn Fn(i32) -> Option<SkirmishLaunchMode>;
+
+/// `[Settings] GameMode` (Spawner.Config.cpp reads it into `MPModeIndex`). The
+/// launcher owns which maps a mode may use: the file names one fixed map, so
+/// `IsValidMap` (`0x005D63E0`) has no list to filter.
+fn spawn_mode(settings: &IniSection, row: ModeRow<'_>) -> Result<SkirmishLaunchMode> {
     let id = integer(settings, "GameMode", crate::skirmish_launch::BATTLE_MODE_ID)?;
-    spawn_modes()
-        .find(|mode| mode.id == id)
-        .with_context(|| format!("GameMode={id} is not a stock YR mode"))
+    row(id).with_context(|| format!("GameMode={id} has no MPModesMD.ini row"))
 }
 
 /// The team choices network setup offers a mode (`view.rs`' Team column and
@@ -301,7 +308,37 @@ impl SpawnRequest {
         Ok(request)
     }
 
+    /// Checks an offline launch against the stock Battle row whatever its
+    /// GameMode: the rows are known once the game loaded them, when
+    /// [`Self::admit_loaded_modes`] reads the launch again.
     pub(crate) fn parse(text: &str) -> Result<Self> {
+        Self::parse_with_modes(text, &|_| {
+            SkirmishLaunchMode::stock(crate::skirmish_launch::BATTLE_MODE_ID)
+        })
+    }
+
+    /// Spawner.cpp sets `MPGameModeClass::Get(MPModeIndex)`, else `Get(1)`,
+    /// after `0x005D7CE0` loaded MPModesMD.ini, so a mod's own rows start too.
+    /// An offline launch is read again against that roster, or the stock rows
+    /// when none loaded; the map stays the one [`Self::read`] resolved.
+    pub(crate) fn admit_loaded_modes(self, modes: &[SkirmishGameMode]) -> Result<Self> {
+        let SpawnGame::Skirmish(admitted) = &self.game else {
+            return Ok(self);
+        };
+        let mut request = Self::parse_with_modes(&self.text, &|id| {
+            if modes.is_empty() {
+                SkirmishLaunchMode::stock(id)
+            } else {
+                mode_by_id(modes, id).map(SkirmishLaunchMode::from_game_mode)
+            }
+        })?;
+        if let SpawnGame::Skirmish(session) = &mut request.game {
+            session.selected_map_file = admitted.selected_map_file.clone();
+        }
+        Ok(request)
+    }
+
+    fn parse_with_modes(text: &str, offline_row: ModeRow<'_>) -> Result<Self> {
         let ini = IniFile::from_str(text.trim_start_matches('\u{feff}'));
         let settings = ini
             .section("Settings")
@@ -343,13 +380,11 @@ impl SpawnRequest {
             );
         }
 
-        let mut game_speed = ranged(
-            settings,
-            "GameSpeed",
-            0,
-            0,
-            i32::from(crate::sim::game_options::IN_GAME_OPTIONS_MAX_SPEED),
-        )?;
+        let mut game_speed = integer(settings, "GameSpeed", 0)?;
+        ensure!(
+            u8::try_from(game_speed).is_ok_and(is_selectable_game_speed),
+            "GameSpeed={game_speed} is not a selectable game speed"
+        );
         let seed = settings
             .is_present("Seed")
             .then(|| integer(settings, "Seed", 0))
@@ -388,7 +423,7 @@ impl SpawnRequest {
                     "Side",
                     0,
                     0,
-                    if crate::rules::ARES_ENABLED {
+                    if crate::rules::ARES_BUILD {
                         i32::from(u8::MAX)
                     } else {
                         1
@@ -398,7 +433,15 @@ impl SpawnRequest {
                 build_off_ally: boolean(settings, "BuildOffAlly", false)?,
             })
         } else if multiplayer {
-            let mut session = skirmish(&ini, settings, scenario, game_speed, player_count)?;
+            // *(VERA)* Network launches keep the stock rows `--probe` lists.
+            let mut session = skirmish(
+                &ini,
+                settings,
+                scenario,
+                game_speed,
+                player_count,
+                &SkirmishLaunchMode::stock,
+            )?;
             let transport = transport(&ini, settings, &session)?;
             if let SpawnTransport::Relay(relay) = &transport {
                 // The relay runs the certificate's fixed clock; a different
@@ -419,6 +462,9 @@ impl SpawnRequest {
                 scenario,
                 game_speed,
                 player_count,
+                &|id| {
+                    offline_row(id).or_else(|| offline_row(crate::skirmish_launch::BATTLE_MODE_ID))
+                },
             )?))
         };
         Ok(Self {
@@ -426,6 +472,7 @@ impl SpawnRequest {
             game_speed,
             seed,
             expected,
+            text: text.to_owned(),
         })
     }
 }
@@ -464,8 +511,9 @@ fn skirmish(
     scenario: String,
     game_speed: i32,
     player_count: usize,
+    mode_row: ModeRow<'_>,
 ) -> Result<SkirmishLaunchSession> {
-    let mode = spawn_mode(settings)?;
+    let mode = spawn_mode(settings, mode_row)?;
     // The supplied client profile writes No. SpecialHouseIsAlly is a Spawner
     // extension, not part of the stock offline Session's alliance owner.
     ensure!(
@@ -473,8 +521,8 @@ fn skirmish(
         "SpecialHouseIsAlly=Yes is unsupported; use the VERA client profile"
     );
     let multiplayer = player_count > 1 || ini.section("Relay").is_some();
-    // *(VERA)* One human is admitted as a network room admits it, in any stock
-    // mode and with up to thirty houses, because a lobby plays every one-human
+    // *(VERA)* One human is admitted as a network room admits it, in any mode
+    // and with up to thirty houses, because a lobby plays every one-human
     // game without a relay. Retail Skirmish lists only Battle and Free for All
     // (`0x005D6263`), which VERA's Skirmish screen keeps.
     let ai_count = ranged(
@@ -751,7 +799,7 @@ pub(crate) const fn max_spawn_country_index() -> i32 {
     // replacement4E3A6A ->1001E2C0 retains Country+B8 without that cap.
     // The shared launch owner validates allocation again after scenario Rules
     // reset; this early reader only admits its canonical identity width.
-    if crate::rules::ARES_ENABLED {
+    if crate::rules::ARES_BUILD {
         u16::MAX as i32
     } else {
         9
@@ -983,8 +1031,8 @@ fn transport(
             certificate.sources_mask == (1u32 << player_count) - 1,
             "[Relay] OrderingCertificate roster does not match PlayerCount={player_count}"
         );
-        // The lobby derives this clock from the launch speed table
-        // [60,45,30,20,15,12,10], the native PreCalcFrameRate rows.
+        // The lobby derives this clock from the native PreCalcFrameRate
+        // rows plus VERA's 90-tick preset.
         let game_speed = crate::net::lockstep::game_speed_for_frame_rate(certificate.tick_hz)
             .with_context(|| {
                 format!(

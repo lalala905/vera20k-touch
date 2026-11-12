@@ -48,6 +48,7 @@ pub(crate) struct FireSubject<'a> {
 /// it compares with the target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FirerPart {
+    ares: bool,
     class: FirerClass,
     frame: i32,
     /// Every link to the target unset: [`Self::facts`] sets them.
@@ -87,6 +88,7 @@ impl FirerPart {
         firer.locomotor_target = link(self.locomotor_target);
         firer.temporal = self.temporal_target.map(link);
         FireFacts {
+            ares: self.ares,
             class: self.class,
             frame: self.frame,
             weapon_index,
@@ -423,6 +425,7 @@ impl<'a> FireSubject<'a> {
             ..FirerTypeFacts::default()
         };
         FirerPart {
+            ares: self.rules.ares(),
             class,
             frame: frame as i32,
             firer: firer_facts,
@@ -1000,8 +1003,21 @@ impl FireQuery for WorldQuery<'_, '_> {
         })
     }
 
+    /// Every retail locomotor answers Ok; Tunnel's (`0x0072A1C0`) answers
+    /// FIRE_MOVING while its State is set.
     fn locomotor_can_fire(&mut self) -> FireError {
-        FireError::Ok
+        let digging = self
+            .subject
+            .firer
+            .locomotor
+            .as_ref()
+            .and_then(|locomotor| locomotor.tunnel_runtime())
+            .is_some_and(crate::sim::movement::tunnel_movement::TunnelRuntime::blocks_fire);
+        if digging {
+            FireError::Moving
+        } else {
+            FireError::Ok
+        }
     }
 
     fn jumpjet_locomotor(&mut self) -> bool {

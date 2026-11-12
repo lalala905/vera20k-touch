@@ -420,13 +420,18 @@ pub(crate) fn view(state: &AppState) -> Option<SetupView> {
                     .filter(|ai| ai.raw_slot_index != row && !ai.color_random)
                     .map(|ai| usize::from(ai.color_index)),
             );
-        let color_claims =
-            color_claims.filter(|_| launch.humans.len() + launch.opponents.len() <= 8);
-        let colors =
-            skirmish_shell::available_color_choices(usize::try_from(color).ok(), color_claims)
-                .into_iter()
-                .map(|item| choice(state, item))
-                .collect::<Vec<_>>();
+        let lobby_colors = state.lobby_colors();
+        let color_claims = color_claims.filter(|_| {
+            launch.humans.len() + launch.opponents.len() <= lobby_colors.lobby_color_count()
+        });
+        let colors = skirmish_shell::available_color_choices(
+            lobby_colors,
+            usize::try_from(color).ok(),
+            color_claims,
+        )
+        .into_iter()
+        .map(|item| choice(state, item))
+        .collect::<Vec<_>>();
         // VERA shared control: outside Cooperative a player may pick a start
         // another player holds, which joins that player's House. Such starts
         // stay listed, marked "+".
@@ -519,15 +524,16 @@ pub(crate) fn view(state: &AppState) -> Option<SetupView> {
     let trackbars = vec![
         SetupTrackbar {
             id: SPEED,
-            value: skirmish_shell::game_speed_visual_position(options.game_speed),
+            value: crate::ui::shell::game_speed::SpeedContext::Network
+                .visual_position(options.game_speed),
             range: bounds.range(SkirmishTrackbarId::GameSpeed0x529),
             enabled: host,
             visible: true,
         },
         SetupTrackbar {
             id: CREDITS,
-            value: options.starting_credits,
-            range: bounds.range(SkirmishTrackbarId::Credits0x511),
+            value: bounds.credits_visual_position(options.starting_credits),
+            range: bounds.visual_range(SkirmishTrackbarId::Credits0x511),
             enabled: host,
             visible: true,
         },

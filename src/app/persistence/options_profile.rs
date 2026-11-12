@@ -47,6 +47,27 @@ pub(crate) const RETAIL_SHELL_SIZE: ScreenSize = ScreenSize {
     width: 800,
     height: 600,
 };
+/// The size VERA opens the player's window at in place of gamemd's 800x600
+/// shell, in logical units. A VERA difference: 800x600 is small on today's
+/// screens. Only the window is larger; the shell's 800x600 art scales to fit
+/// it (`ShellScale`) and a match takes the window's size, as at any size the
+/// player drags it to.
+pub(crate) const VERA_LAUNCH_WINDOW_SIZE: ScreenSize = ScreenSize {
+    width: 1024,
+    height: 768,
+};
+
+/// The size the player's window opens at, and the Esc menu's Set Window Size
+/// button and Full Screen going off return to, for gamemd's startup shell
+/// size: [`VERA_LAUNCH_WINDOW_SIZE`] for the 800x600 shell, while the 640x480
+/// one a player asks for with `AllowModeToggle` stays.
+pub(crate) fn player_launch_window_size(startup_shell_screen: ScreenSize) -> ScreenSize {
+    if startup_shell_screen == RETAIL_SHELL_SIZE {
+        VERA_LAUNCH_WINDOW_SIZE
+    } else {
+        startup_shell_screen
+    }
+}
 
 /// The process-lifetime subset of active-YR `OptionsClass` owned by
 /// `VERA.INI` `[Options]`, `[Video]`, and `[Audio]`.
@@ -136,10 +157,6 @@ pub(crate) struct RetailOptionsProfile {
     /// own string-table key. Off by default; a start with it on shows the
     /// texts until the hotkey asks for keys.
     pub(crate) show_string_keys: bool,
-    /// `[VERA] RenderInterpolation=`: client-only motion smoothing. Off by
-    /// default, so new profiles draw the original tick-stepped motion; it never
-    /// changes the simulation rate or saves.
-    pub(crate) render_interpolation: bool,
     /// `[VERA] MouseWheelZoom=`: let the mouse wheel change the battle's
     /// view distance. Off by default; this is a local camera preference.
     pub(crate) mouse_wheel_zoom: bool,
@@ -185,6 +202,12 @@ pub(crate) struct RetailOptionsProfile {
     /// mobile strip while [`Self::shift_queue`] is on. VERA's own convenience;
     /// gamemd never reads this section. Clamped by [`SHIFT_QUEUE_COUNT_RANGE`].
     pub(crate) shift_queue_count: u32,
+    /// `[VERA] AutoRepair=`: the Options page's Auto Repair box. On, the
+    /// player's own game sends the ordinary Repair order for each of their
+    /// damaged buildings (`app::input::auto_repair`, `docs/auto-repair.md`).
+    /// A local input preference: nothing in the rules or on the network
+    /// changes. Off by default, so buildings wait for the wrench as in gamemd.
+    pub(crate) auto_repair: bool,
     /// `[VERA] TerrainDeformation=`: the Options page's Terrain Deformation
     /// box. Explosions dent open ground as in Tiberian Sun and a nuke leaves a
     /// crater (`docs/terrain-deformation.md`). Unlike the presentation boxes it
@@ -193,8 +216,8 @@ pub(crate) struct RetailOptionsProfile {
     /// Off by default.
     pub(crate) terrain_deformation: bool,
     /// `[VERA] WolTestService=`: Internet answers from VERA's stand-in WOL
-    /// service instead of showing `TXT_APIMISSING`: the Options page's
-    /// developer box. Off by default; no real service exists yet.
+    /// service instead of showing `TXT_APIMISSING`. No Options page offers it.
+    /// Off by default; no real service exists yet.
     pub(crate) wol_test_service: bool,
     /// `[VERA] SoloSkirmish=`: Start accepts a skirmish that has fewer than two
     /// sides for an undisturbed test match — either no AI row enabled, or every
@@ -234,12 +257,16 @@ pub(crate) struct RetailOptionsProfile {
     /// value. Defaults to the native rule. Client presentation only: the
     /// simulation never reads it, and the profile writer round-trips the value.
     pub(crate) health_bars: crate::ui::main_menu_dialogs::options::HealthBarMode,
-    /// `[VERA] TranslateChat=`: the language received online chat is
-    /// translated into, or `None`, the default, for off. The Options list
-    /// changes it and Options' accept writes it with the rest; the
-    /// `/translate` chat command writes it alone
+    /// `[VERA] ColorVisionMode=`: the whole-viewport colour-vision filter, as
+    /// a [`ColorVisionMode`](crate::ui::main_menu_dialogs::options::ColorVisionMode)
+    /// value. `Off` keeps the retail image. Client presentation only: the
+    /// final frame pass reads it live, and the simulation never sees it.
+    pub(crate) color_vision: crate::ui::main_menu_dialogs::options::ColorVisionMode,
+    /// `[VERA] Translate*=`: what received online chat is translated into, and
+    /// where. The lobby's Chat Translation page and the `/translate` chat
+    /// command change it, and write it alone
     /// ([`Self::commit_chat_translation`]).
-    pub(crate) translate_chat: Option<crate::ui::chat_translation::ChatLanguage>,
+    pub(crate) chat_translation: crate::ui::chat_translation::ChatTranslationSettings,
     /// `[VERA] Language=`: the tag of the interface language the player chose
     /// ([`crate::i18n`]); `None`, the default, follows the system's languages.
     /// Only the Language list changes it; Options' accept writes it out.
@@ -268,19 +295,6 @@ pub(crate) struct RetailOptionsProfile {
     /// voice never names it. Client presentation only: no sim, audio, state
     /// hash or network protocol reads it. Off by default.
     pub(crate) detailed_eva_text: bool,
-    /// `[VERA] WindowX/WindowY`: where the windowed game last sat, so the next
-    /// launch opens there. `None`, with neither key written, until the window
-    /// has sat somewhere. Its size is not kept: a windowed launch always opens
-    /// at gamemd's startup size ([`RetailOptionsLoad::startup_shell_screen`]).
-    pub(crate) window_placement: Option<WindowPlacement>,
-}
-
-/// The windowed game's last placement: its outer top-left corner in the
-/// desktop's physical pixels, the frame monitors report theirs in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct WindowPlacement {
-    pub(crate) x: i32,
-    pub(crate) y: i32,
 }
 
 /// The two process-start products obtained from one physical `VERA.INI`
@@ -338,7 +352,6 @@ impl Default for RetailOptionsProfile {
             yr_original_style: false,
             skip_intro: false,
             show_string_keys: false,
-            render_interpolation: false,
             mouse_wheel_zoom: false,
             right_click_orders: false,
             lock_cursor: false,
@@ -349,6 +362,7 @@ impl Default for RetailOptionsProfile {
             hd_map_previews: true,
             house_color_strength: crate::rules::house_colors::STRENGTH_RETAIL,
             shift_queue: false,
+            auto_repair: false,
             shift_queue_count: DEFAULT_SHIFT_QUEUE_COUNT,
             terrain_deformation: false,
             wol_test_service: false,
@@ -358,14 +372,14 @@ impl Default for RetailOptionsProfile {
             custom_end_game_score: false,
             custom_end_game_movie: false,
             health_bars: crate::ui::main_menu_dialogs::options::HealthBarMode::Vanilla,
-            translate_chat: None,
+            color_vision: crate::ui::main_menu_dialogs::options::ColorVisionMode::Off,
+            chat_translation: Default::default(),
             language: None,
             skipped_update: String::new(),
             online_name: String::new(),
             online_locale: 0,
             display: crate::ui::main_menu_dialogs::options::DisplayTarget::Auto,
             detailed_eva_text: false,
-            window_placement: None,
         }
     }
 }
@@ -583,8 +597,6 @@ impl RetailOptionsProfile {
             let legacy_skip = vera.read_bool("SkipStartupLogo", self.skip_intro);
             self.skip_intro = vera.read_bool("SkipIntro", legacy_skip);
             self.show_string_keys = vera.read_bool("ShowStringKeys", self.show_string_keys);
-            self.render_interpolation =
-                vera.read_bool("RenderInterpolation", self.render_interpolation);
             self.mouse_wheel_zoom = vera.read_bool("MouseWheelZoom", self.mouse_wheel_zoom);
             self.right_click_orders = vera.read_bool("RightClickOrders", self.right_click_orders);
             self.lock_cursor = vera.read_bool("LockCursor", self.lock_cursor);
@@ -607,6 +619,7 @@ impl RetailOptionsProfile {
             );
             self.terrain_deformation =
                 vera.read_bool("TerrainDeformation", self.terrain_deformation);
+            self.auto_repair = vera.read_bool("AutoRepair", self.auto_repair);
             self.wol_test_service = vera.read_bool("WolTestService", self.wol_test_service);
             self.solo_skirmish = vera.read_bool("SoloSkirmish", self.solo_skirmish);
             self.commander_feedback = vera.read_bool("CommanderFeedback", self.commander_feedback);
@@ -622,9 +635,25 @@ impl RetailOptionsProfile {
             self.health_bars = crate::ui::main_menu_dialogs::options::HealthBarMode::from_ini_value(
                 vera.read_int("HealthBars", self.health_bars.ini_value()),
             );
+            // Absent keeps the current value; a value this build does not know
+            // reads as Off instead of enabling a filter with no matrix.
+            self.color_vision =
+                crate::ui::main_menu_dialogs::options::ColorVisionMode::from_ini_value(
+                    vera.read_int("ColorVisionMode", self.color_vision.ini_value()),
+                );
+            let chat = &mut self.chat_translation;
             if let Some(value) = vera.read_name("TranslateChat", 16) {
-                self.translate_chat = crate::ui::chat_translation::ChatLanguage::from_tag(value);
+                chat.set_language(crate::ui::chat_translation::ChatLanguage::from_tag(value));
             }
+            for place in crate::ui::chat_translation::ChatPlace::ALL {
+                chat.set_translates(
+                    place,
+                    vera.read_bool(place.ini_key(), chat.translates(place)),
+                );
+            }
+            chat.show_source = vera.read_bool("TranslateShowSource", chat.show_source);
+            chat.same_alphabet = vera.read_bool("TranslateSameAlphabet", chat.same_alphabet);
+            chat.set_readable_tags(&vera.read_string("TranslateKnown", "", 64));
             // Empty, as a profile that never picked one writes it, follows
             // the system again.
             if let Some(value) = vera.read_name("Language", 16) {
@@ -645,18 +674,6 @@ impl RetailOptionsProfile {
             if let Some(value) = vera.read_name("Display", DISPLAY_CAPACITY) {
                 self.display =
                     crate::ui::main_menu_dialogs::options::DisplayTarget::from_ini_value(value);
-            }
-            // Earlier builds also saved the window's size and wrote a window
-            // never placed as 0x0, which still reads as unset; the writer
-            // drops those keys.
-            let unplaced = ["WindowWidth", "WindowHeight"]
-                .iter()
-                .any(|key| vera.is_present(key) && vera.read_int(key, 0) <= 0);
-            if vera.is_present("WindowX") && vera.is_present("WindowY") && !unplaced {
-                self.window_placement = Some(WindowPlacement {
-                    x: vera.read_int("WindowX", 0),
-                    y: vera.read_int("WindowY", 0),
-                });
             }
         }
     }
@@ -768,10 +785,6 @@ impl RetailOptionsProfile {
                     format_bool(self.custom_end_game_movie).to_string(),
                 ),
                 (
-                    "RenderInterpolation",
-                    format_bool(self.render_interpolation).to_string(),
-                ),
-                (
                     "MouseWheelZoom",
                     format_bool(self.mouse_wheel_zoom).to_string(),
                 ),
@@ -798,7 +811,6 @@ impl RetailOptionsProfile {
                     format_bool(self.hd_map_previews).to_string(),
                 ),
                 ("Language", self.language.clone().unwrap_or_default()),
-                ("TranslateChat", self.translate_chat_value().to_owned()),
                 (
                     "DetailedEvaText",
                     format_bool(self.detailed_eva_text).to_string(),
@@ -807,10 +819,12 @@ impl RetailOptionsProfile {
                     "TerrainDeformation",
                     format_bool(self.terrain_deformation).to_string(),
                 ),
+                ("AutoRepair", format_bool(self.auto_repair).to_string()),
                 (
                     "ShowStringKeys",
                     format_bool(self.show_string_keys).to_string(),
                 ),
+                ("ColorVisionMode", self.color_vision.ini_value().to_string()),
             ],
         }
     }
@@ -843,30 +857,18 @@ impl RetailOptionsProfile {
         let output =
             crate::util::ini_writer::set_ini_byte_values(&output, NETWORK_SECTION, &network);
         let output = apply_formatted_section(&output, VERA_SECTION, &formatted.vera);
-        // The corner is written only once the window has one, so a profile
-        // without it opens the window as a first launch does.
-        let output = match self.window_placement {
-            Some(placement) => {
-                let (x, y) = (placement.x.to_string(), placement.y.to_string());
-                set_ini_values(
-                    &output,
-                    VERA_SECTION,
-                    &[("WindowX", x.as_str()), ("WindowY", y.as_str())],
-                )
-            }
-            None => crate::util::ini_writer::remove_ini_keys(
-                &output,
-                VERA_SECTION,
-                &["WindowX", "WindowY"],
-            ),
-        };
+        // The window keys are from earlier builds: a windowed launch now
+        // always opens centred, at gamemd's startup size.
         crate::util::ini_writer::remove_ini_keys(
             &output,
             VERA_SECTION,
             &[
                 "RA2Look",
+                "RenderInterpolation",
                 "SoundDefaultsApplied",
                 "SkipStartupLogo",
+                "WindowX",
+                "WindowY",
                 "WindowWidth",
                 "WindowHeight",
                 "WindowMaximized",
@@ -890,7 +892,8 @@ impl RetailOptionsProfile {
         profile_file::update(ra2_dir, |input| self.transform_wol_preferences(input))
     }
 
-    /// The `/translate` command's writer: `[VERA] TranslateChat=` alone.
+    /// The Chat Translation page's and the `/translate` command's writer: the
+    /// `[VERA] Translate*=` keys alone.
     pub(crate) fn commit_chat_translation(&self, ra2_dir: &Path) -> io::Result<()> {
         profile_file::update(ra2_dir, |input| self.transform_chat_translation(input))
     }
@@ -932,16 +935,20 @@ impl RetailOptionsProfile {
     }
 
     fn transform_chat_translation(&self, input: &[u8]) -> Vec<u8> {
-        set_ini_values(
-            input,
-            VERA_SECTION,
-            &[("TranslateChat", self.translate_chat_value())],
-        )
-    }
-
-    /// The `[VERA] TranslateChat=` value: the language's tag, or `off`.
-    fn translate_chat_value(&self) -> &'static str {
-        self.translate_chat.map_or("off", |language| language.tag())
+        use crate::ui::chat_translation::{ChatLanguage, ChatPlace};
+        let chat = &self.chat_translation;
+        let readable = chat.readable_tags();
+        let mut values = vec![(
+            "TranslateChat",
+            chat.language.map_or("off", ChatLanguage::tag),
+        )];
+        values.extend(
+            ChatPlace::ALL.map(|place| (place.ini_key(), format_bool(chat.translates(place)))),
+        );
+        values.push(("TranslateShowSource", format_bool(chat.show_source)));
+        values.push(("TranslateSameAlphabet", format_bool(chat.same_alphabet)));
+        values.push(("TranslateKnown", readable.as_str()));
+        set_ini_values(input, VERA_SECTION, &values)
     }
 
     fn transform_wol_preferences(&self, input: &[u8]) -> Vec<u8> {
@@ -1435,6 +1442,32 @@ ScoreVolume=0.3\nIsScoreShuffle=yes\nSoundLatency=4\nInGameMusic=no\n[VERA]\nZoo
         );
     }
 
+    /// The player's window opens at 1024x768 where gamemd's shell is 800x600,
+    /// with or without a VERA.INI; AllowModeToggle's 640x480 stays.
+    #[test]
+    fn player_window_opens_at_1024x768_in_place_of_the_800x600_shell() {
+        let defaults = RetailStartupOptions::default();
+        let no_file = RetailOptionsLoad::without_settings(&defaults);
+        let game_size = load_snapshot(&defaults, b"[Video]\nScreenWidth=640\nScreenHeight=480\n");
+        for load in [no_file, game_size] {
+            assert_eq!(
+                player_launch_window_size(load.startup_shell_screen),
+                ScreenSize {
+                    width: 1024,
+                    height: 768
+                }
+            );
+        }
+        let toggle = load_snapshot(&defaults, b"[Video]\nAllowModeToggle=yes\n");
+        assert_eq!(
+            player_launch_window_size(toggle.startup_shell_screen),
+            ScreenSize {
+                width: 640,
+                height: 480
+            }
+        );
+    }
+
     #[test]
     fn present_ini_key_overrides_argv_while_missing_key_keeps_argv_default() {
         let startup = RetailStartupOptions {
@@ -1638,94 +1671,78 @@ ScoreVolume=0.3\nIsScoreShuffle=yes\nSoundLatency=4\nInGameMusic=no\n[VERA]\nZoo
     }
 
     #[test]
-    fn options_accept_writes_the_chat_translation_language() {
-        use crate::ui::chat_translation::ChatLanguage;
+    fn chat_translation_writes_only_its_own_keys_and_reads_back() {
+        use crate::ui::chat_translation::{ChatLanguage, ChatPlace};
         let startup = RetailStartupOptions::default();
-        let profile = RetailOptionsProfile {
-            translate_chat: Some(ChatLanguage::Japanese),
-            ..RetailOptionsProfile::default()
-        };
-        // A language picked in Options replaces one /translate saved.
-        let accepted = profile.transform_settings(b"[VERA]\r\nTranslateChat=zh-Hans\r\n");
-        assert_eq!(
-            load_snapshot(&startup, &accepted)
-                .retained_profile
-                .translate_chat,
-            Some(ChatLanguage::Japanese)
-        );
-        let off = RetailOptionsProfile::default().transform_settings(&accepted);
-        assert_eq!(
-            load_snapshot(&startup, &off)
-                .retained_profile
-                .translate_chat,
-            None
-        );
-    }
-
-    #[test]
-    fn chat_translation_writes_only_its_own_key_and_reads_back() {
-        use crate::ui::chat_translation::ChatLanguage;
-        let startup = RetailStartupOptions::default();
-        let profile = RetailOptionsProfile {
-            translate_chat: Some(ChatLanguage::SimplifiedChinese),
-            ..RetailOptionsProfile::default()
-        };
+        let mut profile = RetailOptionsProfile::default();
+        let chat = &mut profile.chat_translation;
+        chat.language = Some(ChatLanguage::SimplifiedChinese);
+        chat.set_translates(ChatPlace::Match, false);
+        chat.show_source = false;
+        chat.same_alphabet = true;
+        chat.set_reads(ChatLanguage::English, true);
+        chat.set_reads(ChatLanguage::Korean, true);
         let output = profile.transform_chat_translation(b"[VERA]\r\nZoom=150\r\n");
         let text = String::from_utf8(output.clone()).unwrap();
         assert!(
-            text.contains("Zoom=150") && text.contains("TranslateChat=zh-Hans"),
+            text.contains("Zoom=150")
+                && text.contains("TranslateChat=zh-Hans")
+                && text.contains("TranslateKnown=en,ko"),
             "{text}"
         );
-        let reread = load_snapshot(&startup, &output);
-        assert_eq!(
-            reread.retained_profile.translate_chat,
-            Some(ChatLanguage::SimplifiedChinese)
-        );
+        let reread = load_snapshot(&startup, &output).retained_profile;
+        assert_eq!(reread.chat_translation, profile.chat_translation);
+
+        // Back to off, and an emptied list stays empty.
         let off = RetailOptionsProfile::default().transform_chat_translation(&output);
-        assert_eq!(
-            load_snapshot(&startup, &off)
-                .retained_profile
-                .translate_chat,
-            None
-        );
+        let reread = load_snapshot(&startup, &off).retained_profile;
+        assert_eq!(reread.chat_translation, Default::default());
     }
 
-    /// The window keeps only its corner. The size and maximised keys earlier
-    /// builds wrote are dropped, and their 0x0 for a window never placed
-    /// still reads as unset, as no corner at all does.
     #[test]
-    fn window_corner_round_trips_and_the_saved_size_retires() {
+    fn options_accept_leaves_the_chat_translation_keys_alone() {
+        use crate::ui::chat_translation::ChatLanguage;
         let startup = RetailStartupOptions::default();
-        let window_keys = |bytes: &[u8]| -> Vec<String> {
-            let ini = IniFile::from_bytes(bytes).unwrap();
-            let vera = ini.section(VERA_SECTION).unwrap();
-            vera.keys()
-                .filter(|key| key.starts_with("Window"))
-                .map(str::to_owned)
-                .collect()
+        let accepted = RetailOptionsProfile::default()
+            .transform_settings(b"[VERA]\r\nTranslateChat=ja\r\nTranslateKnown=ko\r\n");
+        let chat = load_snapshot(&startup, &accepted)
+            .retained_profile
+            .chat_translation;
+        assert_eq!(chat.language, Some(ChatLanguage::Japanese));
+        assert!(chat.reads(ChatLanguage::Korean));
+    }
+
+    /// A language with no saved choice starts as picking it would; a saved
+    /// choice stays.
+    #[test]
+    fn same_alphabet_starts_by_language_until_a_choice_is_saved() {
+        let startup = RetailStartupOptions::default();
+        let same_alphabet = |ini: &[u8]| {
+            load_snapshot(&startup, ini)
+                .retained_profile
+                .chat_translation
+                .same_alphabet
         };
-        let placed = RetailOptionsProfile {
-            window_placement: Some(WindowPlacement { x: -1200, y: 40 }),
-            ..RetailOptionsProfile::default()
-        };
-        let output = placed.transform_settings(
+        assert!(same_alphabet(b"[VERA]\r\nTranslateChat=de\r\n"));
+        assert!(!same_alphabet(b"[VERA]\r\nTranslateChat=en\r\n"));
+        assert!(!same_alphabet(
+            b"[VERA]\r\nTranslateChat=de\r\nTranslateSameAlphabet=no\r\n"
+        ));
+    }
+
+    /// A windowed launch opens centred, so the window keys earlier builds
+    /// wrote are dropped at the next save.
+    #[test]
+    fn saved_window_keys_retire() {
+        let startup = RetailStartupOptions::default();
+        let output = RetailOptionsProfile::default().transform_settings(
             b"[VERA]\nWindowX=5\nWindowY=6\nWindowWidth=1280\nWindowHeight=720\n\
               WindowMaximized=yes\n",
         );
-        assert_eq!(window_keys(&output), ["WindowX", "WindowY"]);
-        assert_eq!(
-            load_snapshot(&startup, &output)
-                .retained_profile
-                .window_placement,
-            placed.window_placement
-        );
-        let unplaced = b"[VERA]\nWindowX=0\nWindowY=0\nWindowWidth=0\nWindowHeight=0\n";
-        let profile = load_snapshot(&startup, unplaced).retained_profile;
-        assert_eq!(profile.window_placement, None);
-        let unset = profile.transform_settings(unplaced);
-        assert!(window_keys(&unset).is_empty());
-        let unset = load_snapshot(&startup, &unset).retained_profile;
-        assert_eq!(unset.window_placement, None);
+        let ini = IniFile::from_bytes(&output).unwrap();
+        let vera = ini.section(VERA_SECTION).unwrap();
+        assert!(!vera.keys().any(|key| key.starts_with("Window")));
+        let unset = load_snapshot(&startup, &output).retained_profile;
         // The lock starts off, its icon is the red star, the radar is native
         // and the sidebar and online menus sharp, and map previews are VERA's
         // own; all six round-trip.
@@ -1869,7 +1886,7 @@ ScoreVolume=0.3\nIsScoreShuffle=yes\nSoundLatency=4\nInGameMusic=no\n[VERA]\nZoo
                 .retained_profile
                 .mouse_wheel_zoom
         );
-        let input = b"[VERA]\nMouseWheelZoom=yes\nRenderInterpolation=no\nUnowned=keep\n";
+        let input = b"[VERA]\nMouseWheelZoom=yes\nUnowned=keep\n";
         let mut profile = load_snapshot(&startup, input).retained_profile;
         assert!(profile.mouse_wheel_zoom);
         let written = profile.transform_settings(input);
@@ -1882,7 +1899,6 @@ ScoreVolume=0.3\nIsScoreShuffle=yes\nSoundLatency=4\nInGameMusic=no\n[VERA]\nZoo
         let written = profile.transform_settings(&written);
         let reloaded = load_snapshot(&startup, &written).retained_profile;
         assert!(!reloaded.mouse_wheel_zoom);
-        assert!(!reloaded.render_interpolation);
         assert!(String::from_utf8_lossy(&written).contains("Unowned=keep"));
     }
 
@@ -1911,29 +1927,6 @@ ScoreVolume=0.3\nIsScoreShuffle=yes\nSoundLatency=4\nInGameMusic=no\n[VERA]\nZoo
                 .right_click_orders
         );
         assert!(String::from_utf8_lossy(&written).contains("Unowned=keep"));
-    }
-
-    #[test]
-    fn render_interpolation_preference_uses_the_existing_vera_profile_transaction() {
-        let startup = RetailStartupOptions::default();
-        assert!(
-            !load_snapshot(&startup, b"")
-                .retained_profile
-                .render_interpolation
-        );
-        for (value, expected) in [("yes", true), ("no", false)] {
-            let input = format!("[VERA]\nRenderInterpolation={value}\nUnowned=keep\n");
-            let profile = load_snapshot(&startup, input.as_bytes()).retained_profile;
-            assert_eq!(profile.render_interpolation, expected);
-            let written = profile.transform_settings(input.as_bytes());
-            assert!(String::from_utf8_lossy(&written).contains("Unowned=keep"));
-            assert_eq!(
-                load_snapshot(&startup, &written)
-                    .retained_profile
-                    .render_interpolation,
-                expected
-            );
-        }
     }
 
     /// `[VERA] CommanderFeedback=` is the talking-head switch. It defaults to
@@ -1992,6 +1985,42 @@ ScoreVolume=0.3\nIsScoreShuffle=yes\nSoundLatency=4\nInGameMusic=no\n[VERA]\nZoo
                     .health_bars,
                 expected,
                 "HealthBars={value} survives the profile writer"
+            );
+        }
+    }
+
+    /// `[VERA] ColorVisionMode=` is the whole-viewport filter: zero is the
+    /// retail image and the default, and a value this build does not know
+    /// reads as Off, so a hand-edited INI never enables an unknown matrix.
+    #[test]
+    fn color_vision_modes_read_and_round_trip() {
+        use crate::ui::main_menu_dialogs::options::ColorVisionMode;
+
+        let startup = RetailStartupOptions::default();
+        assert_eq!(
+            load_snapshot(&startup, b"").retained_profile.color_vision,
+            ColorVisionMode::Off
+        );
+        for (value, expected) in [
+            (0, ColorVisionMode::Off),
+            (1, ColorVisionMode::Generic),
+            (2, ColorVisionMode::Deuteranopia),
+            (3, ColorVisionMode::Protanopia),
+            (4, ColorVisionMode::Tritanopia),
+            (7, ColorVisionMode::Off),
+            (-1, ColorVisionMode::Off),
+        ] {
+            let input = format!("[VERA]\nColorVisionMode={value}\nUnowned=keep\n");
+            let profile = load_snapshot(&startup, input.as_bytes()).retained_profile;
+            assert_eq!(profile.color_vision, expected, "ColorVisionMode={value}");
+            let written = String::from_utf8(profile.transform_settings(input.as_bytes())).unwrap();
+            assert!(written.contains("Unowned=keep"), "{written}");
+            assert_eq!(
+                load_snapshot(&startup, written.as_bytes())
+                    .retained_profile
+                    .color_vision,
+                expected,
+                "ColorVisionMode={value} survives the profile writer"
             );
         }
     }
@@ -2055,26 +2084,22 @@ ScoreVolume=0.3\nIsScoreShuffle=yes\nSoundLatency=4\nInGameMusic=no\n[VERA]\nZoo
     }
 
     #[test]
-    fn original_yr_style_and_render_interpolation_round_trip_independently() {
+    fn original_yr_style_round_trips_and_retired_keys_are_dropped() {
         let startup = RetailStartupOptions::default();
         for style in [false, true] {
-            for interpolation in [false, true] {
-                let input = format!(
-                    "[VERA]\nYROriginalStyle={}\nRenderInterpolation={}\nRA2Look=yes\nUnowned=keep\n",
-                    format_bool(style),
-                    format_bool(interpolation),
-                );
-                let profile = load_snapshot(&startup, input.as_bytes()).retained_profile;
-                assert_eq!(profile.yr_original_style, style);
-                assert_eq!(profile.render_interpolation, interpolation);
-                let written = profile.transform_settings(input.as_bytes());
-                let text = String::from_utf8_lossy(&written);
-                assert!(!text.contains("RA2Look="));
-                assert!(text.contains("Unowned=keep"));
-                let reloaded = load_snapshot(&startup, &written).retained_profile;
-                assert_eq!(reloaded.yr_original_style, style);
-                assert_eq!(reloaded.render_interpolation, interpolation);
-            }
+            let input = format!(
+                "[VERA]\nYROriginalStyle={}\nRenderInterpolation=yes\nRA2Look=yes\nUnowned=keep\n",
+                format_bool(style),
+            );
+            let profile = load_snapshot(&startup, input.as_bytes()).retained_profile;
+            assert_eq!(profile.yr_original_style, style);
+            let written = profile.transform_settings(input.as_bytes());
+            let text = String::from_utf8_lossy(&written);
+            assert!(!text.contains("RA2Look="));
+            assert!(!text.contains("RenderInterpolation="));
+            assert!(text.contains("Unowned=keep"));
+            let reloaded = load_snapshot(&startup, &written).retained_profile;
+            assert_eq!(reloaded.yr_original_style, style);
         }
     }
 

@@ -252,16 +252,22 @@ pub(crate) fn rebuild_base_zone_topology(
     );
     let adjacency = edge_buckets.into_adjacency(zone_count);
 
-    let raw_zone_ids_by_row = std::array::from_fn(|row| {
+    // Each movement row derives its zones from the shared graph alone, so the
+    // rows run on the worker pool; `parallel::map` keeps them in row order.
+    let grid = crate::map::cell_index::CellGrid::for_extent(width, height);
+    let rows = crate::sim::parallel::map(MovementZone::all_ground(), |&movement_zone| {
         rebuild_zone_ids_for_movement_zone(
             &movement_classes,
             &zone_ids,
             zone_count,
             &adjacency,
-            MovementZone::all_ground()[row],
-            crate::map::cell_index::CellGrid::for_extent(width, height),
+            movement_zone,
+            grid,
         )
     });
+    let raw_zone_ids_by_row = rows
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("all_ground lists the 13 concrete movement rows"));
 
     BaseZoneTopology {
         native_bridge_source_size,
@@ -815,19 +821,20 @@ pub(crate) fn build_bridge_redirect(
     bridge_records: &[BridgeEndpointRecord],
     width: u16,
     height: u16,
-) -> Option<Vec<Option<(u16, u16)>>> {
+) -> Option<super::zone_map::BridgeRedirect> {
     let terrain = resolved_terrain?;
 
-    let total = width as usize * height as usize;
-    let mut redirect: Vec<Option<(u16, u16)>> = vec![None; total];
-    let mut has_structural_cell = false;
-
-    for ry in 0..height {
+    // Each cell's entry reads only the terrain and the records, so the rows
+    // run on the worker pool; `parallel::map` keeps them in row order.
+    let rows: Vec<u16> = (0..height).collect();
+    let rows = crate::sim::parallel::map(&rows, |&ry| {
+        let mut row: Vec<Option<(u16, u16)>> = vec![None; usize::from(width)];
+        let mut has_structural_cell = false;
         for rx in 0..width {
             let Some(cell) = terrain.cell(rx, ry) else {
                 continue;
             };
-            let idx = ry as usize * width as usize + rx as usize;
+            let idx = usize::from(rx);
             if !cell.bridge_facts.has_structural_bridge() {
                 // A nonstructural cell keeps its own ground zone on the bridge
                 // layer only where a high record actually reaches it — the deck
@@ -835,17 +842,19 @@ pub(crate) fn build_bridge_redirect(
                 // have no bridge layer at all; that includes every cell of a low
                 // bridge, which is ground movement rather than deck movement.
                 if find_high_bridge_record(bridge_records, 0, (rx, ry), 1).is_some() {
-                    redirect[idx] = Some((rx, ry));
+                    row[idx] = Some((rx, ry));
                 }
                 continue;
             }
             has_structural_cell = true;
 
-            redirect[idx] = bridge_redirect_for_structural_cell(terrain, bridge_records, (rx, ry));
+            row[idx] = bridge_redirect_for_structural_cell(terrain, bridge_records, (rx, ry));
         }
-    }
+        (row, has_structural_cell)
+    });
 
-    has_structural_cell.then_some(redirect)
+    let has_structural_cell = rows.iter().any(|(_, structural)| *structural);
+    has_structural_cell.then(|| rows.into_iter().flat_map(|(row, _)| row).collect())
 }
 
 /// `MapClass::GetZoneID` 0x0056D230, bridge branch. Verified term by term
@@ -933,13 +942,10 @@ mod tests {
         query: (u16, u16),
         enabled: bool,
     ) -> (u16, u16) {
-        let cell = crate::sim::cell_rect::get_cellclass_fallback(
-            Some(terrain),
-            i32::from(query.0 as i16),
-            i32::from(query.1 as i16),
-        );
+        let cells = crate::map::resolved_terrain::NativeCellQuery::canonical(terrain);
+        let cell = cells.lookup((query.0 as i16, query.1 as i16));
         crate::sim::pathfinding::zone_search::native_path_entry::live_hierarchy_projection(
-            terrain, records, &cell, enabled, None,
+            &cells, records, cell, enabled, None,
         )
         .expect("fixture has an addressable terminating projection")
     }
@@ -1302,6 +1308,13 @@ mod tests {
 
     #[test]
     fn gsi_04_12_hierarchy_projection_no_record_ties_choose_east_and_south() {
+        use crate::map::resolved_terrain::NativeCellQuery;
+        use crate::sim::cell_rect::PlayfieldBounds;
+        use crate::sim::pathfinding::zone_map::ZoneQueryCell::{Copied, Retained};
+        use crate::sim::pathfinding::zone_search::native_path_entry::{
+            live_hierarchy_projection, resolve_bridge_endpoint,
+        };
+
         let horizontal = redirect_terrain(7, 5, Some(100), None, |cell| {
             if cell.ry == 2 && (2..=4).contains(&cell.rx) {
                 cell.bridge_facts.raw_flags = crate::map::bridge_facts::BRIDGE_FLAG_STRUCTURAL
@@ -1315,6 +1328,23 @@ mod tests {
             project_live_cell_for_test(&horizontal, &[], (3, 2), true),
             (5, 2)
         );
+        let cells = NativeCellQuery::canonical(&horizontal);
+        assert_eq!(
+            resolve_bridge_endpoint(&cells, &[], Copied((3, 2)), Copied((1, 2)), None),
+            Ok((1, 2)),
+            "5833F0's no-record search measures from its separate reference"
+        );
+        let records = [BridgeEndpointRecord {
+            endpoint_a: (1, 1),
+            endpoint_b: (5, 1),
+            active: true,
+            bridge_kind: BridgeRecordKind::High,
+        }];
+        assert_eq!(
+            resolve_bridge_endpoint(&cells, &records, Copied((3, 0)), Copied((3, 0)), None),
+            Ok((5, 1)),
+            "5833F0 admits a nonstructural cell at tolerance one and returns raw endpoint B on a tie"
+        );
 
         let vertical = redirect_terrain(5, 7, Some(100), None, |cell| {
             if cell.rx == 2 && (2..=4).contains(&cell.ry) {
@@ -1327,6 +1357,30 @@ mod tests {
         assert_eq!(
             project_live_cell_for_test(&vertical, &[], (2, 3), true),
             (2, 5)
+        );
+
+        // No high exit: both mode-one sentinel probes stamp the same Dummy.
+        //5833F0 re-reads a retained input, but preserves a copied input;
+        //583180 retains its distinct unsupported record[-1] policy.
+        let mut terrain = redirect_terrain(5, 1, None, None, |_| {});
+        terrain.test_set_native_allocated_cells(&[(2, 0), (4, 0)]);
+        let cells = NativeCellQuery::isolated(&terrain);
+        cells.dummy().test_set_retained_bridge_flags(0x900);
+        let bounds = Some(PlayfieldBounds::from_normalized_local_size(5, 0, 0, 5, 1));
+        assert_eq!(
+            resolve_bridge_endpoint(&cells, &[], Copied((3, 0)), Copied((4, 0)), bounds),
+            Ok((3, 0))
+        );
+        let input = cells.lookup((3, 0));
+        assert_eq!(
+            resolve_bridge_endpoint(&cells, &[], Retained(input), Copied((4, 0)), bounds),
+            Ok((0, 0))
+        );
+        assert_eq!(cells.coord(input), (0, 0));
+        let input = cells.lookup((3, 0));
+        assert_eq!(
+            live_hierarchy_projection(&cells, &[], input, true, bounds),
+            Err("583180 record[-1] after sentinel fallback")
         );
     }
 

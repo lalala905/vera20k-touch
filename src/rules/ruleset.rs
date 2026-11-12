@@ -889,11 +889,16 @@ pub struct GeneralRules {
     /// house at `MaxIQLevels` (`0x004FC0FF`), and a human house's MakeAlly
     /// (`0x004F9C5F`), run Computer_Paranoid. Retail yes.
     pub paranoid: bool,
-    /// Low byte of `CliffBackImpassability=` in `[General]`.
-    /// Byte 0 skips the scan; only byte 2 can write Rock. Default 2 in standard YR.
+    /// Low byte of `CliffBackImpassability=` in `[General]`, as
+    /// `read_cliff_back_impassability` reads it. Byte 0 skips the scan; only
+    /// byte 2 can write Rock.
     pub cliff_back_impassability: u8,
-    /// Underground travel speed for Tunnel locomotor units (TunnelSpeed=).
-    /// Default 6.0 cells/second matching RA2 default.
+    /// `[General] TunnelSpeed=` (`Rules+0x20`): ReadDouble at `0x0066EDA9`
+    /// over the constructor's 1.0 (`0x00665685..0x00665688`); retail 1. The
+    /// Tunnel locomotor scales its sink and rise speed by it and divides its
+    /// dig-in time by it (`movement::tunnel_movement`). Kept as `SimFixed`,
+    /// whose rounding of a non-dyadic value can move a truncated product by
+    /// one.
     pub tunnel_speed: SimFixed,
     /// Rules+598: ReadDouble at 66EC37, constructor .25 at 665DBD.
     /// Bullet guidance uses sin((signed native ID + frame) % 15 * 2pi/15).
@@ -924,6 +929,16 @@ pub struct GeneralRules {
     /// Rules+420, [JumpjetControls] CruiseHeight. Object5F4260 uses this
     /// global threshold; linked Jumpjets instead use their own +2C height.
     pub display_cruise_height: i32,
+    /// VERA: `[JumpjetControls] SmoothFacing=` (default no). When set, a
+    /// Jumpjet's body no longer snaps to its locomotor's stale heading on
+    /// take-off and turns at its ROT for an Unload
+    /// ([docs/jumpjet-smooth-facing.md]).
+    pub jumpjet_smooth_facing: bool,
+    /// VERA: `[JumpjetControls] LandNearby=` (default 0, at most 8). A
+    /// Jumpjet refused its landing cell lands on the nearest clear cell
+    /// within this many cells instead of hovering
+    /// ([docs/jumpjet-land-nearby.md]).
+    pub jumpjet_land_nearby: i32,
     /// `[General] HoverHeight=`, Rules+0x5CC: the Hover altitude controller's
     /// cruise height in leptons (0x00513D20). Constructor 120 (0x00665E2B).
     pub hover_height: i32,
@@ -1061,6 +1076,10 @@ pub struct GeneralRules {
     /// clears it; ReadGeneral66FC36..66FC50 retains the current byte.
     /// The shared manual-attack query owns the disguise and blink exceptions.
     pub attack_cursor_on_disguise: bool,
+    /// `[General] AllowShroudedSubteranneanMoves`, Rules+17EF. Constructor
+    /// 665650 clears it at66776F; ReadGeneral66EB03..66EB1C retains the
+    /// current bool. Foot object-click4D785F consumes this shroud gate.
+    allow_shrouded_subterannean_moves: bool,
     /// `[General] DefaultMirageDisguises=` selection pool, in source order.
     pub default_mirage_disguises: Vec<String>,
     /// General AlliedDisguise/SovietDisguise/ThirdDisguise (Rules
@@ -1396,13 +1415,19 @@ pub struct GeneralRules {
     ///
     /// gamemd: `RulesClass::ReadAudioVisual @ 0x00669331..0x00669367` reads
     /// the key at `0x0083AB70` (`"DigSound"`). Despite the name it is the
-    /// nuke siren — stock `rulesmd.ini` says so in a comment — and
-    /// `SuperClass::Launch @ 0x006CC390` case 0 (`Type=MultiMissile`) is its
-    /// only reader, playing it at the target coordinate through
-    /// `VocClass::PlayAtCoord @ 0x00750E20` on both branches
-    /// (`0x006CDCA8`/`0x006CDCAE` when the silo animates the launch,
-    /// `0x006CDDE3`/`0x006CDDE9` when it does not).
+    /// nuke siren — stock `rulesmd.ini` says so in a comment.
+    /// `SuperClass::Launch @ 0x006CC390` case 0 (`Type=MultiMissile`) plays
+    /// it at the target coordinate through `VocClass::PlayAtCoord @
+    /// 0x00750E20` on both branches (`0x006CDCA8`/`0x006CDCAE` when the silo
+    /// animates the launch, `0x006CDDE3`/`0x006CDDE9` when it does not), and
+    /// the Tunnel locomotor plays it at the digger as it digs in and out
+    /// (`movement::tunnel_movement`).
     pub dig_sound: Option<String>,
+    /// `[AudioVisual] Dig=` (`Rules+0x294`), the AnimType the Tunnel
+    /// locomotor spawns at the digger as it digs in and out: ReadString and
+    /// the AnimType lookup at `0x0066A587..0x0066A5B1` over the constructor's
+    /// null (`0x00665A10`). Retail leaves it unset.
+    pub dig_anim: Option<String>,
     /// `[General] NukeTakeOff=` (stock `NUKETO`), the AnimType at `Rules+0x98`
     /// (ReadString then the AnimType lookup, `0x0066D829..0x0066D850`;
     /// constructor null at `0x00665735`). `BuildingClass::Mission_Missile`
@@ -1745,6 +1770,10 @@ pub struct GeneralRules {
     /// Fire/smoke anim types spawned on buildings below ConditionYellow health.
     /// Parsed from DamageFireTypes= in [General]. Default: FIRE01,FIRE02,FIRE03.
     pub damage_fire_types: Vec<AnimRef>,
+    /// ReadAudioVisual66B0E4..66B1CF retains the ordered OnFire Anim pointers
+    /// for BuildingReceiveDamage442785. RulesCtor666568..66659E starts empty;
+    /// these runtime keys preserve distinct Anim slots with equal stored IDs.
+    pub on_fire: Vec<String>,
     /// Particle system spawned by exploding barrels.
     /// Parsed from `BarrelParticle=` in `[General]` (NOT `[AudioVisual]`,
     /// despite the proximity to other AudioVisual keys).
@@ -2072,6 +2101,11 @@ pub struct GeneralRules {
     /// death spawns it (`10049280` -> `TechnoExt::SpawnVisceroid @ 100468B0`).
     #[cfg(feature = "ares")]
     pub small_visceroid: Option<String>,
+    /// `[General] LargeVisceroid=` (`Rules+0x10`), read the same way just
+    /// before it (ReadString returning at `0x0066E677`). Ares' visceroid
+    /// merge makes two small ones this type (`1004C530`).
+    #[cfg(feature = "ares")]
+    pub large_visceroid: Option<String>,
 
     // -- Movement delay timers --
     /// Retained [AI] PathDelay double, in minutes (Rules+1760).
@@ -2365,7 +2399,7 @@ impl ParadropList {
     /// processed rules' ([`RuleSet::from_processed_rules`]).
     fn read_counts(general: &crate::rules::ini_parser::IniSection, key: &str) -> Self {
         #[cfg(feature = "ares")]
-        let counts = general.read_ares_int_list(key);
+        let counts = crate::rules::ares_switch::not_ares_read(|| general.read_ares_int_list(key));
         #[cfg(not(feature = "ares"))]
         let counts = general.read_int_list(key);
         Self {
@@ -2710,7 +2744,7 @@ impl Default for GeneralRules {
             ally_change_allowed: true,
             comp_easy_bonus: true,
             paranoid: true,
-            tunnel_speed: SimFixed::from_num(6.0_f32),
+            tunnel_speed: SimFixed::ONE,
             missile_rot_var: 0.25,
             safety_altitude: 500,
             line_trail_color_override: [0; 3],
@@ -2718,6 +2752,8 @@ impl Default for GeneralRules {
             flight_level: 500,
             attacking_aircraft_sight_range: 5,
             display_cruise_height: 400, // Rules constructor665C3A
+            jumpjet_smooth_facing: false,
+            jumpjet_land_nearby: 0,
             // Rules constructor 0x00665E2B..0x00665E81.
             hover_height: 120,
             hover_bob: NativeF64Bits::from_bits(0x403e_0000_0000_0000),
@@ -2785,6 +2821,7 @@ impl Default for GeneralRules {
                 None,
             ],
             attack_cursor_on_disguise: false,
+            allow_shrouded_subterannean_moves: false,
             default_mirage_disguises: Vec::new(),
             infantry_disguises: Default::default(),
             secret_lab_choices: Default::default(),
@@ -2857,6 +2894,7 @@ impl Default for GeneralRules {
             // definition of EAX before it is `0x00667202 MOV EAX,0x1`.
             lightning_print_text: true,
             dig_sound: None,
+            dig_anim: None,
             nuke_take_off: String::new(),
             ai_super_defense_probability: Vec::new(),
             ai_super_defense_distance: 10,
@@ -2936,6 +2974,7 @@ impl Default for GeneralRules {
             spy_power_blackout: 0,
             spy_money_steal_percent: NativeF32Bits::from_bits(0x3F00_0000),
             damage_fire_types: vec![],
+            on_fire: Vec::new(),
             barrel_particle: None,
             barrel_explode: None,
             barrel_debris: Vec::new(),
@@ -3025,6 +3064,8 @@ impl Default for GeneralRules {
             tiberium_transmogrify: 0,
             #[cfg(feature = "ares")]
             small_visceroid: None,
+            #[cfg(feature = "ares")]
+            large_visceroid: None,
             // PathDelay=.01 min = 0.6 sec = 9 ticks at 15 Hz.
             path_delay: 0.016,
             // BlockagePathDelay=60 frames (directly in frames, not minutes).
@@ -3058,7 +3099,7 @@ impl Default for GeneralRules {
             iq_auto_crush: 2,
             iq_sell_back: 2,
             credit_reserve: 1000,
-            cliff_back_impassability: 2,
+            cliff_back_impassability: read_cliff_back_impassability(None),
             lightning_storm_duration: 900,
             lightning_damage: 200,
             lightning_deferment: 250,
@@ -3499,7 +3540,26 @@ pub(crate) fn ambient_change_terms(rate: f64, step: f64) -> (bool, i32, i32) {
     )
 }
 
+/// `[General] CliffBackImpassability=` (`Rules+0x664`, a byte): ReadInt in
+/// RulesClass::ReadGeneral (`0x0066D530`, `0x0066F1CB..0x0066F1E6`) over the
+/// constructor's 0 (`0x00665F3B`), keeping the low byte. Retail RULESMD sets 2.
+/// The early overlay branch of `CellClass::RecalcAttributes` (`0x0047D2B0`)
+/// skips its neighbour test when the byte is 0 (`0x0047D386..0x0047D393`) and
+/// writes Rock only when it is 2 (`0x0047D52F..0x0047D53E`).
+///
+/// Residual: gamemd constructs RulesClass once, in Init_Game (`0x0052BA60`,
+/// call at `0x0052BAD1`), so rules that never set the key keep the byte of the
+/// scenario played before. VERA starts every scenario at 0. No retail rules
+/// omit the key.
+pub(crate) fn read_cliff_back_impassability(general: Option<&IniSection>) -> u8 {
+    general.map_or(0, |general| general.read_int("CliffBackImpassability", 0)) as u8
+}
+
 impl GeneralRules {
+    pub fn allow_shrouded_subterannean_moves(&self) -> bool {
+        self.allow_shrouded_subterannean_moves
+    }
+
     pub(crate) fn threat_coefficient_defaults(
         &self,
     ) -> super::threat_coefficients::ThreatCoefficients {
@@ -3666,6 +3726,15 @@ impl GeneralRules {
             .map_or(defaults.display_cruise_height, |s| {
                 s.read_int("CruiseHeight", defaults.display_cruise_height)
             });
+        // VERA key, not a gamemd one; absent means the original's snaps.
+        let jumpjet_smooth_facing = ini
+            .section("JumpjetControls")
+            .is_some_and(|s| s.read_bool("SmoothFacing", false));
+        // VERA key; 0 keeps the original's hover over a taken cell.
+        let jumpjet_land_nearby = ini
+            .section("JumpjetControls")
+            .map_or(0, |s| s.read_int("LandNearby", 0))
+            .clamp(0, 8);
         // AI IQ thresholds live in their own [IQ] read.
         let iq = ini.section_or_empty("IQ");
         // gamemd-derived: `RulesClass__ReadIQ @ 0x00674240` reads signed
@@ -3718,31 +3787,20 @@ impl GeneralRules {
         let path_delay = ai.read_double("PathDelay", defaults.path_delay);
         let blockage_path_delay_ticks =
             ai.read_int("BlockagePathDelay", defaults.blockage_path_delay_ticks);
-        // ReadAudioVisual6691E0 is independent of the ReadGeneral section
-        // gate.66B673..66B754 reads all three class lights and stores signed
-        // milliunits after the active x87 chop-toward-zero conversion.
-        // Original no-General GI control: infantry_berserk_body.json.
-        // Retained residual: a later AudioVisual pass with a missing key uses
-        // native signed integer /1000 defaults; this projection retains fractions.
-        let extra_unit_light = (audio_visual
-            .read_double("ExtraUnitLight", defaults.extra_unit_light as f64 / 1000.0)
-            * 1000.0) as i32;
-        let extra_infantry_light = (audio_visual.read_double(
-            "ExtraInfantryLight",
-            defaults.extra_infantry_light as f64 / 1000.0,
-        ) * 1000.0) as i32;
-        let extra_aircraft_light = (audio_visual.read_double(
-            "ExtraAircraftLight",
-            defaults.extra_aircraft_light as f64 / 1000.0,
-        ) * 1000.0) as i32;
+        // ReadAudioVisual66B673..66B74E belongs to the retained Process
+        // owner; a final merged INI cannot reproduce omitted-key defaults.
+        let extra_unit_light = defaults.extra_unit_light;
+        let extra_infantry_light = defaults.extra_infantry_light;
+        let extra_aircraft_light = defaults.extra_aircraft_light;
         // Phobos `RulesExt` reads these `[AudioVisual]` keys independently of
         // RulesClass's `[General]` gate.
         #[cfg(feature = "phobos")]
         let airstrike_line_color =
             audio_visual.read_phobos_color("AirstrikeLineColor", defaults.airstrike_line_color);
         #[cfg(feature = "phobos")]
-        let airstrike_line_z_adjust =
-            audio_visual.read_ares_int("AirstrikeLineZAdjust", defaults.airstrike_line_z_adjust);
+        let airstrike_line_z_adjust = crate::rules::ares_switch::not_ares_read(|| {
+            audio_visual.read_ares_int("AirstrikeLineZAdjust", defaults.airstrike_line_z_adjust)
+        });
         let Some(general) = ini.section("General") else {
             return Self {
                 message_delay_minutes,
@@ -3753,6 +3811,8 @@ impl GeneralRules {
                 iq_harvester,
                 iq_super_weapons,
                 display_cruise_height,
+                jumpjet_smooth_facing,
+                jumpjet_land_nearby,
                 condition_yellow: condition_yellow_native,
                 condition_red: condition_red_native,
                 path_delay,
@@ -3956,13 +4016,15 @@ impl GeneralRules {
             ally_change_allowed,
             comp_easy_bonus: defaults.comp_easy_bonus,
             paranoid,
-            tunnel_speed: SimFixed::from_num(general.read_double("TunnelSpeed", 6.0) as f32),
+            tunnel_speed: SimFixed::from_num(general.read_double("TunnelSpeed", 1.0) as f32),
             flight_level: general.read_int("FlightLevel", 500),
             attacking_aircraft_sight_range: general.read_int(
                 "AttackingAircraftSightRange",
                 defaults.attacking_aircraft_sight_range,
             ),
             display_cruise_height,
+            jumpjet_smooth_facing,
+            jumpjet_land_nearby,
             // ReadGeneral 0x0066EDC5..0x0066EE83 reads these into their
             // fields with the current value as default (%-aware ReadDouble).
             hover_height: general.read_int("HoverHeight", defaults.hover_height),
@@ -3997,6 +4059,7 @@ impl GeneralRules {
             growth_rate_minutes: general.read_double("GrowthRate", 2.0) as f32,
             // Published from the retained General pass owner.
             attack_cursor_on_disguise: defaults.attack_cursor_on_disguise,
+            allow_shrouded_subterannean_moves: defaults.allow_shrouded_subterannean_moves,
             // Filled from the native ordered TerrainType list owner after
             // processing, including allocation/none-token/retention semantics.
             default_mirage_disguises: Vec::new(),
@@ -4101,6 +4164,9 @@ impl GeneralRules {
             // constructor's `true` (see the field doc).
             lightning_print_text: general.read_bool("LightningPrintText", true),
             dig_sound: audio_visual.read_name("DigSound", 0x80).map(str::to_owned),
+            // Published by the Rules processor's `Dig` pointer
+            // (`rules_type_references`).
+            dig_anim: None,
             nuke_take_off: defaults.nuke_take_off.clone(),
             ai_super_defense_probability: general
                 .read_int_list("AISuperDefenseProbability")
@@ -4244,6 +4310,7 @@ impl GeneralRules {
             spy_money_steal_percent: general
                 .read_double_to_float("SpyMoneyStealPercent", defaults.spy_money_steal_percent),
             damage_fire_types: defaults.damage_fire_types.clone(),
+            on_fire: defaults.on_fire.clone(),
             barrel_particle: defaults.barrel_particle.clone(),
             barrel_explode: defaults.barrel_explode.clone(),
             barrel_debris: defaults.barrel_debris.clone(),
@@ -4357,9 +4424,11 @@ impl GeneralRules {
             #[cfg(feature = "ares")]
             tiberium_transmogrify: general
                 .read_int("TiberiumTransmogrify", defaults.tiberium_transmogrify),
-            // The ordered Process owner publishes it (`RulesTypeReferences`).
+            // The ordered Process owner publishes them (`RulesTypeReferences`).
             #[cfg(feature = "ares")]
             small_visceroid: None,
+            #[cfg(feature = "ares")]
+            large_visceroid: None,
             path_delay,
             blockage_path_delay_ticks,
             // ReadGeneral670235..670267 uses the same475D70 signed vector
@@ -4374,20 +4443,23 @@ impl GeneralRules {
             #[cfg(feature = "phobos")]
             decloak_damaged_targets: general.read_bool("DecloakDamagedTargets", true),
             #[cfg(feature = "phobos")]
-            rof_random_delay: combat_damage.read_ares_partial_int_pair(
-                "ROF.RandomDelay",
-                crate::rules::ini_value::PartialIntPair {
-                    low: 0,
-                    high: 2,
-                    values: 2,
-                },
-            ),
+            rof_random_delay: crate::rules::ares_switch::not_ares_read(|| {
+                combat_damage.read_ares_partial_int_pair(
+                    "ROF.RandomDelay",
+                    crate::rules::ini_value::PartialIntPair {
+                        low: 0,
+                        high: 2,
+                        values: 2,
+                    },
+                )
+            }),
             // Ares 3.0 Buf_AI (1005B830, hook 0x672B0E): ParseList<int>
             // (1005B030) replaces the original IntVector read.
             #[cfg(feature = "ares")]
-            ai_force_prediction_fudge: ai
-                .read_ares_int_list("AIForcePredictionFudge")
-                .unwrap_or_default(),
+            ai_force_prediction_fudge: crate::rules::ares_switch::not_ares_read(|| {
+                ai.read_ares_int_list("AIForcePredictionFudge")
+            })
+            .unwrap_or_default(),
             #[cfg(not(feature = "ares"))]
             ai_force_prediction_fudge: ai
                 .read_int_list("AIForcePredictionFudge")
@@ -4410,7 +4482,7 @@ impl GeneralRules {
             iq_auto_crush: iq.read_int("AutoCrush", defaults.iq_auto_crush),
             iq_sell_back: iq.read_int("SellBack", defaults.iq_sell_back),
             credit_reserve: ai.read_int("CreditReserve", defaults.credit_reserve),
-            cliff_back_impassability: general.read_int("CliffBackImpassability", 2) as u8,
+            cliff_back_impassability: read_cliff_back_impassability(Some(general)),
             lightning_storm_duration: general
                 .read_int("LightningStormDuration", defaults.lightning_storm_duration),
             lightning_damage: general.read_int("LightningDamage", defaults.lightning_damage),
@@ -4731,7 +4803,9 @@ pub struct RuleSet {
     /// Effective side for each country after `[Sides]` membership and the
     /// per-country `Side=` override have both run.
     country_sides: Vec<Option<SideIdx>>,
-    /// `[Colors]` scheme entries in declaration order. Source of truth for every
+    /// `[Colors]` scheme entries in declaration order, then the built-in extra
+    /// lobby colours that section leaves out
+    /// ([`crate::rules::skirmish_colors`]). Source of truth for every
     /// house-color producer (loading-bar backing, lobby swatch, map `Color=`,
     /// skirmish slot priority).
     pub color_schemes: Vec<crate::rules::color_scheme::ColorSchemeEntry>,
@@ -4826,6 +4900,10 @@ pub struct RuleSet {
     /// Immutable projection of NativeRulesRegistryState's ordered armor catalog.
     ares_armors: Option<crate::rules::ares_armor::ArmorCatalog>,
     emp_sparkles: Option<String>,
+    /// Whether Ares plays in this game, decided once from its Rules layers
+    /// and `ares.mix` by `rules::ares_switch`. Read through [`Self::ares`].
+    #[cfg(feature = "ares")]
+    ares: bool,
     #[cfg(feature = "ares")]
     ares_global_controls: crate::rules::native_processing::AresGlobalControls,
     /// Presentation projection of the retained Ares `[MouseCursors]` list.
@@ -4932,9 +5010,9 @@ pub struct RuleSet {
     #[cfg(feature = "phobos")]
     pub(crate) placement_preview_globals:
         crate::rules::phobos_placement_preview::PlacementPreviewGlobals,
-    /// Phobos `[General] SkirmishUnlimitedColors=`: the player-colour
-    /// conversion every launcher and loading-screen consumer reads.
-    #[cfg(feature = "phobos")]
+    /// The player-colour conversion every launcher and loading-screen consumer
+    /// reads, and the colours a lobby lists: `[SkirmishColors]` and Phobos
+    /// `[General] SkirmishUnlimitedColors=`.
     pub(crate) skirmish_color_mode: crate::rules::skirmish_colors::SkirmishColorMode,
     /// Radar event visual parameters (ping rectangles on minimap).
     pub radar_event_config: RadarEventConfig,
@@ -4999,6 +5077,7 @@ pub struct RuleSet {
     /// active AssetManager with effect assets. Gameplay and rendering share
     /// the GPU-independent physical model loader.
     voxel_assets: crate::rules::voxel_asset_catalog::VoxelAssetCatalog,
+    pub(crate) voxel_model_plan: super::voxel_model_plan::VoxelModelPlan,
     /// Every building type's construction control from its Buildup SHP,
     /// bound once from the active assets (`bind_building_buildup_assets`).
     buildup_assets: crate::rules::buildup_asset_catalog::BuildupAssetCatalog,
@@ -5287,7 +5366,22 @@ impl RuleSet {
         Self::from_processed_rules(&layers.process()?)
     }
 
+    /// Project processed Rules into the game's rules. The projection's reader
+    /// lookups are recorded, so the per-game Ares switch it stores
+    /// ([`Self::ares`]) also counts the keys only these readers read.
     pub fn from_processed_rules(processed: &ProcessedRulesLayers) -> Result<Self, RulesError> {
+        #[cfg(feature = "ares")]
+        {
+            let (rules, reads) = crate::rules::ares_switch::record(|| Self::project(processed));
+            let mut rules = rules?;
+            rules.ares = processed.ares_inputs().decide(&reads);
+            Ok(rules)
+        }
+        #[cfg(not(feature = "ares"))]
+        Self::project(processed)
+    }
+
+    fn project(processed: &ProcessedRulesLayers) -> Result<Self, RulesError> {
         processed.validate_saved_state()?;
         let mut rules = Self::from_projected_ini(
             processed,
@@ -5432,12 +5526,13 @@ impl RuleSet {
         rules.combat_damage.tiberium_explosion_damage = processed.tiberium_explosion_damage();
         rules.combat_damage.death_weapon =
             processed.combat_damage_death_weapon().map(str::to_owned);
-        for (name, conventional, em_effect, anim_list, debris_types, verses, ares_verses) in
+        for (name, conventional, em_effect, sparky, anim_list, debris_types, verses, ares_verses) in
             processed.warhead_read_states()
         {
             if let Some(warhead) = rules.warhead_mut(name) {
                 warhead.conventional = conventional;
                 warhead.em_effect = em_effect;
+                warhead.sparky = sparky;
                 warhead.anim_list = anim_list.to_vec();
                 warhead.debris_types = debris_types.to_vec();
                 warhead.verses_f64 = verses.map(|value| f64::from_bits(value.bits()));
@@ -5692,6 +5787,11 @@ impl RuleSet {
             rules.general.unit_repair_rate,
             rules.general.infantry_repair_rate,
         ) = processed.repair_service_inputs();
+        [
+            rules.general.extra_unit_light,
+            rules.general.extra_infantry_light,
+            rules.general.extra_aircraft_light,
+        ] = processed.class_extra_lights();
         rules.general.charge_to_drain_ratio = processed.charge_to_drain_ratio();
         let mut weapon_name_counts = HashMap::<String, usize>::new();
         for weapon in processed.weapon_states() {
@@ -5825,6 +5925,15 @@ impl RuleSet {
                 references.apply_to(object);
             }
         }
+        for (name, trailer) in processed.aircraft_trailer_states() {
+            if let Some(object) = rules
+                .object_list
+                .iter_mut()
+                .find(|object| object.category == ObjectCategory::Aircraft && object.id == name)
+            {
+                object.project_aircraft_trailer(trailer);
+            }
+        }
         for (category, name, shadow_index) in processed.voxel_shadow_states() {
             if let Some(object) = rules
                 .object_list
@@ -5841,6 +5950,15 @@ impl RuleSet {
                 .find(|object| object.category == ObjectCategory::Infantry && object.id == name)
             {
                 object.project_infantry_pips(pips);
+            }
+        }
+        for (name, civilian) in processed.infantry_civilian_states() {
+            if let Some(object) = rules
+                .object_list
+                .iter_mut()
+                .find(|object| object.category == ObjectCategory::Infantry && object.id == name)
+            {
+                object.civilian = civilian;
             }
         }
         for (name, art) in processed.infantry_art_states() {
@@ -6693,6 +6811,7 @@ impl RuleSet {
         (general.drain_money_frame_delay, general.drain_money_amount) =
             processed.drain_money_controls();
         general.attack_cursor_on_disguise = processed.attack_cursor_on_disguise();
+        general.allow_shrouded_subterannean_moves = processed.allow_shrouded_subterannean_moves();
         general.tree_strength = processed.tree_strength();
         general.threat_coefficient_defaults = processed.threat_coefficient_defaults();
         general.bomb_ticking_sound = processed.bomb_ticking_sound().map(str::to_owned);
@@ -6796,8 +6915,6 @@ impl RuleSet {
         let placement_preview_globals =
             crate::rules::phobos_placement_preview::PlacementPreviewGlobals::from_ini(ini);
         #[cfg(feature = "phobos")]
-        let skirmish_color_mode = crate::rules::skirmish_colors::SkirmishColorMode::from_ini(ini);
-        #[cfg(feature = "phobos")]
         let radiation = {
             let mut radiation = radiation;
             radiation.radiation_types = processed.radiation_types().cloned().unwrap_or_default();
@@ -6853,7 +6970,12 @@ impl RuleSet {
                     .unwrap_or_default()
             })
             .collect();
-        let color_schemes = crate::rules::color_scheme::parse_color_schemes(ini);
+        let mut color_schemes = crate::rules::color_scheme::parse_color_schemes(ini);
+        // Product extension: the lobby's colours beyond YR's eight. The mode
+        // appends the built-in ones `[Colors]` leaves out, so the ramps below
+        // and every other scheme consumer hold them.
+        let skirmish_color_mode =
+            crate::rules::skirmish_colors::SkirmishColorMode::from_ini(ini, &mut color_schemes);
         let house_color_ramps =
             crate::rules::house_colors::HouseColorRamps::from_schemes(&color_schemes);
         let color_add = processed.color_add_state().0.clone();
@@ -7099,7 +7221,7 @@ impl RuleSet {
         let particle_types = processed.particle_type_projections().collect::<Vec<_>>();
         let (particle_system_types, particle_system_types_by_name) =
             parse_particle_system_types(processed);
-        let (voxel_anim_types, voxel_anim_types_by_name) = parse_voxel_anim_types(ini);
+        let (voxel_anim_types, voxel_anim_types_by_name) = parse_voxel_anim_types(processed);
 
         log::info!(
             "RuleSet loaded: {} objects ({} inf, {} veh, {} air, {} bld), \
@@ -7244,6 +7366,9 @@ impl RuleSet {
             ares_prerequisites: None,
             ares_armors: processed.ares_armors().cloned(),
             emp_sparkles: None,
+            // Decided by `from_processed_rules` once its readers ran.
+            #[cfg(feature = "ares")]
+            ares: false,
             #[cfg(feature = "ares")]
             ares_global_controls: processed.ares_global_controls().clone(),
             #[cfg(feature = "ares")]
@@ -7299,7 +7424,6 @@ impl RuleSet {
             attach_effect_globals,
             #[cfg(feature = "phobos")]
             placement_preview_globals,
-            #[cfg(feature = "phobos")]
             skirmish_color_mode,
             radar_event_config,
             super_weapons,
@@ -7328,6 +7452,7 @@ impl RuleSet {
                 .collect(),
             effect_assets: crate::rules::effect_asset_catalog::EffectAssetCatalog::default(),
             voxel_assets: crate::rules::voxel_asset_catalog::VoxelAssetCatalog::default(),
+            voxel_model_plan: processed.voxel_model_plan().clone(),
             buildup_assets: crate::rules::buildup_asset_catalog::BuildupAssetCatalog::default(),
             rubble_assets: crate::rules::building_rubble::RubbleAssetCatalog::default(),
             terrain_assets: crate::rules::terrain_asset_catalog::TerrainAssetCatalog::default(),
@@ -8086,20 +8211,13 @@ impl RuleSet {
         &self.placement_preview_globals
     }
 
-    /// The player-colour conversion this rules load selects.
+    /// The player-colour conversion this rules load selects and the colours
+    /// its lobby lists.
     ///
     /// A build without the `phobos` feature reads no
-    /// `[General] SkirmishUnlimitedColors=` and always answers the vanilla
-    /// eight-priority table, so callers need no `cfg`.
+    /// `[General] SkirmishUnlimitedColors=`, so callers need no `cfg`.
     pub fn skirmish_colors(&self) -> crate::rules::skirmish_colors::SkirmishColorMode {
-        #[cfg(feature = "phobos")]
-        {
-            self.skirmish_color_mode
-        }
-        #[cfg(not(feature = "phobos"))]
-        {
-            crate::rules::skirmish_colors::SkirmishColorMode::VANILLA
-        }
+        self.skirmish_color_mode
     }
 
     /// Look up a projectile by ID (case-insensitive, gamemd parity).
@@ -8169,6 +8287,18 @@ impl RuleSet {
     /// sensitive to scalar value overrides, not just the type-registry lists.
     pub fn source_ini_hash(&self) -> u64 {
         self.source_ini_hash
+    }
+
+    /// Whether Ares plays in this game: its Rules layers or map hold an Ares
+    /// key, or the game ships `ares.mix` (`rules::ares_switch`). Sim and
+    /// presentation read this one answer. Always false without the `ares`
+    /// build feature.
+    #[inline]
+    pub fn ares(&self) -> bool {
+        #[cfg(feature = "ares")]
+        return self.ares;
+        #[cfg(not(feature = "ares"))]
+        false
     }
 
     /// Resolve one retained palette request. Ares715857->715876 removes
@@ -8313,6 +8443,23 @@ impl RuleSet {
             .hash(&mut hasher);
         b"attack-cursor-disguise-v1".hash(&mut hasher);
         self.general.attack_cursor_on_disguise.hash(&mut hasher);
+        b"allow-shrouded-subterannean-moves-v1".hash(&mut hasher);
+        self.general
+            .allow_shrouded_subterannean_moves
+            .hash(&mut hasher);
+        // InfantryTypeRead52455F retains this byte across missing/invalid
+        // reads; equal current source text may therefore evacuate differently.
+        let mut civilian_types: Vec<_> = self
+            .object_list
+            .iter()
+            .filter(|object| object.category == ObjectCategory::Infantry && object.civilian)
+            .map(|object| object.id.to_ascii_uppercase())
+            .collect();
+        if !civilian_types.is_empty() {
+            civilian_types.sort_unstable();
+            b"infantry-civilian-v1".hash(&mut hasher);
+            civilian_types.hash(&mut hasher);
+        }
         // InfantryType ReadINI5245B8..5245F5 retains both theft bytes across
         // invalid later reads. Flattened text alone cannot identify that state.
         let mut theft_flags: Vec<_> = self
@@ -8422,6 +8569,9 @@ impl RuleSet {
                 .map(|(id, country)| (id, &country.veteran_types)),
         )
         .hash(&mut hasher);
+        // Peers must list the same lobby colours and draw a priority alike.
+        b"skirmish-colors-v1".hash(&mut hasher);
+        self.skirmish_color_mode.hash(&mut hasher);
         // Which plant a computer house splices is simulation state.
         #[cfg(feature = "ares")]
         {
@@ -8514,8 +8664,6 @@ impl RuleSet {
             self.digital_display_globals.hash(&mut hasher);
             b"phobos-placement-preview-v1".hash(&mut hasher);
             self.placement_preview_globals.hash(&mut hasher);
-            b"phobos-skirmish-colors-v1".hash(&mut hasher);
-            self.skirmish_color_mode.hash(&mut hasher);
             self.object_list
                 .iter()
                 .map(|object| {
@@ -8546,9 +8694,13 @@ impl RuleSet {
         // matches this binary. Include that immutable build identity even if
         // the selected INIs contain no extension keys.
         b"rules-build-compatibility-v1".hash(&mut hasher);
-        crate::rules::ARES_ENABLED.hash(&mut hasher);
+        crate::rules::ARES_BUILD.hash(&mut hasher);
         #[cfg(feature = "ares")]
         {
+            // The game's Ares switch: two peers or a replay with the same
+            // layers but another `ares.mix` answer play different games.
+            b"ares-plays-v1".hash(&mut hasher);
+            self.ares.hash(&mut hasher);
             b"ares-global-controls-v1".hash(&mut hasher);
             self.ares_global_controls.hash(&mut hasher);
             b"ares-factory-owners-v1".hash(&mut hasher);
@@ -8979,6 +9131,12 @@ impl RuleSet {
         self.general.parachute_max_fall_rate.hash(&mut hasher);
         self.general.no_parachute_max_fall_rate.hash(&mut hasher);
         self.general.detail.hash(&mut hasher);
+        [
+            self.general.extra_unit_light,
+            self.general.extra_infantry_light,
+            self.general.extra_aircraft_light,
+        ]
+        .hash(&mut hasher);
         self.general.ambient_change_rate_nonzero.hash(&mut hasher);
         self.general
             .ambient_change_interval_frames
@@ -9124,6 +9282,17 @@ impl RuleSet {
         // RulesClass Type pointers and lists. RulesClass also keeps the crate
         // and rocket blocks across Process calls, their scalars across
         // Full_Init's reset.
+        // AircraftTypeSave41CE90/Load41CE20 retain this pair independently
+        // of final source text. Native ComputeCRC41CDB0 omits it; this is
+        // VERA's complete simulation configuration identity, not that CRC.
+        b"aircraft-trailer-v1".hash(&mut hasher);
+        Self::by_upper_id(
+            self.object_list
+                .iter()
+                .filter(|object| object.category == ObjectCategory::Aircraft)
+                .map(|object| (&object.id, object.aircraft_trailer())),
+        )
+        .hash(&mut hasher);
         b"retained-type-references-v3".hash(&mut hasher);
         self.object_list
             .iter()
@@ -9548,6 +9717,7 @@ impl RuleSet {
             .map(|anim| &anim.name)
             .collect::<Vec<_>>()
             .hash(&mut hasher);
+        general.on_fire.hash(&mut hasher);
         (
             &general.dead_bodies,
             &general.base_unit_types,
@@ -9620,6 +9790,7 @@ impl RuleSet {
                 (
                     wh.conventional,
                     wh.em_effect,
+                    wh.sparky,
                     &wh.anim_list,
                     wh.verses_f64.map(f64::to_bits),
                 ),
@@ -9690,6 +9861,7 @@ impl RuleSet {
         self.unit_shp_read_states.hash(&mut hasher);
         self.effect_assets.hash(&mut hasher);
         self.voxel_assets.hash(&mut hasher);
+        self.voxel_model_plan.hash(&mut hasher);
         self.buildup_assets.hash(&mut hasher);
         self.rubble_assets.hash(&mut hasher);
         self.terrain_assets.hash(&mut hasher);
@@ -10520,7 +10692,9 @@ impl RuleSet {
 
     /// Resolve a side name to its stable `[Sides]` registration index.
     pub fn side_index(&self, id: &str) -> Option<SideIdx> {
-        self.side_indices.get(&id.to_ascii_uppercase()).copied()
+        crate::util::native_string::with_ascii_uppercase(id, |key| {
+            self.side_indices.get(key).copied()
+        })
     }
 
     /// Commander personalities from `[AIPersonalities]`. Empty for retail data.
@@ -11524,6 +11698,20 @@ impl RuleSet {
         self.object_list[handle.0 as usize].size = size;
     }
 
+    /// Write a type's slot-9 names (`BuildingType +0x11B0`, `+0x11C0`) as the
+    /// native slot corpora do, past ReadINI's empty-damaged copy.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn set_turret_anim_names_for_test(&mut self, id: &str, normal: &str, damaged: &str) {
+        let name = |name: &str| (!name.is_empty()).then(|| name.to_owned());
+        let object = self
+            .object_list
+            .iter_mut()
+            .find(|object| object.id == id)
+            .unwrap();
+        object.turret_anim = name(normal);
+        object.turret_anim_damaged = name(damaged);
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn art_entry_mut_for_test(
         &mut self,
@@ -11549,6 +11737,25 @@ impl RuleSet {
         );
         self.voxel_assets =
             crate::rules::voxel_asset_catalog::VoxelAssetCatalog::bind(self, asset_manager);
+    }
+
+    pub fn loaded_voxel_model(
+        &self,
+        type_id: &str,
+    ) -> Option<&crate::rules::voxel_asset_catalog::LoadedVoxelModel> {
+        let object = self.object(type_id)?;
+        self.voxel_assets.model(object.category, &object.id)
+    }
+
+    pub fn voxel_anim_model(
+        &self,
+        id: VoxelAnimTypeId,
+    ) -> Option<&crate::rules::voxel_asset_catalog::VoxelPart> {
+        self.voxel_assets.voxel_anim(id.0 as usize)
+    }
+
+    pub(crate) fn voxel_models_bound(&self) -> bool {
+        self.voxel_assets.is_bound()
     }
 
     /// Techno6F9E10's loaded-main-VXL predicate for the type `object` names,
@@ -12020,25 +12227,17 @@ fn project_country_side_registry<'a>(
 /// systems, because `DebrisTypes=` and `Spawns=` resolve by name and the ids
 /// are hashed.
 ///
-/// RESIDUAL: RulesClass::ReadVoxelAnims (`0x00672920`) allocates a type for
-/// every listed name through FindOrAllocate (`0x0074B960`), section or not;
-/// VERA skips an entry without a section, which shifts later ids and leaves a
-/// `DebrisTypes=` reference to it unresolved. Every retail entry has a
-/// section.
-fn parse_voxel_anim_types(ini: &IniFile) -> (Vec<VoxelAnimType>, HashMap<String, VoxelAnimTypeId>) {
-    let ids: Vec<String> = parse_registry(ini, "VoxelAnims");
-    let mut types: Vec<VoxelAnimType> = Vec::with_capacity(ids.len());
-    let mut by_name: HashMap<String, VoxelAnimTypeId> = HashMap::with_capacity(ids.len());
-    for id in &ids {
-        let Some(section) = ini.section(id) else {
-            log::trace!(
-                "VoxelAnimType '{}' listed in [VoxelAnims] but has no section",
-                id
-            );
-            continue;
-        };
-        by_name.insert(id.to_ascii_uppercase(), VoxelAnimTypeId(types.len() as u32));
-        types.push(VoxelAnimType::from_ini_section(id, section));
+/// Native ReadVoxelAnims672920 allocates every listed identity, including
+/// constructor-only entries; the retained processor supplies that exact order.
+fn parse_voxel_anim_types(
+    processed: &ProcessedRulesLayers,
+) -> (Vec<VoxelAnimType>, HashMap<String, VoxelAnimTypeId>) {
+    let types: Vec<_> = processed.voxel_anim_type_projections().collect();
+    let mut by_name = HashMap::new();
+    for (index, kind) in types.iter().enumerate() {
+        by_name
+            .entry(kind.name.to_ascii_uppercase())
+            .or_insert(VoxelAnimTypeId(index as u32));
     }
     (types, by_name)
 }
@@ -12086,7 +12285,7 @@ mod tests {
             RuleSet::from_processed_rules(&layers.process().unwrap()).unwrap()
         };
         let rules = make("Area Guard");
-        let expected = crate::rules::ARES_ENABLED.then_some(MissionType::AreaGuard);
+        let expected = crate::rules::ARES_BUILD.then_some(MissionType::AreaGuard);
         assert_eq!(rules.ares_emp_ai_recover_mission(), expected);
         let retained_hash = rules.simulation_config_hash();
         let mut changed = make("Hunt");
@@ -12097,11 +12296,11 @@ mod tests {
         changed.source_ini_hash = rules.source_ini_hash;
         assert_eq!(
             changed.ares_emp_ai_recover_mission(),
-            crate::rules::ARES_ENABLED.then_some(MissionType::Hunt)
+            crate::rules::ARES_BUILD.then_some(MissionType::Hunt)
         );
         assert_eq!(
             retained_hash == changed.simulation_config_hash(),
-            !crate::rules::ARES_ENABLED
+            !crate::rules::ARES_BUILD
         );
         let fresh = RuleSet::from_processed_rules(
             &RulesLayerStack::new(IniFile::from_str(
@@ -13371,18 +13570,20 @@ CellSpread=0
 
     #[test]
     fn gsi_13_10_extra_object_lights_default_zero_and_parse_signed_truncated_milliunits() {
-        let defaults = GeneralRules::from_ini(&IniFile::from_str(
+        let defaults = RuleSet::from_ini(&IniFile::from_str(
             "[General]\n\
              FixtureOnly=1\n\
              ExtraUnitLight=9.0\n\
              ExtraInfantryLight=8.0\n\
              ExtraAircraftLight=7.0\n",
-        ));
+        ))
+        .unwrap()
+        .general;
         assert_eq!(defaults.extra_unit_light, 0);
         assert_eq!(defaults.extra_infantry_light, 0);
         assert_eq!(defaults.extra_aircraft_light, 0);
 
-        let parsed = GeneralRules::from_ini(&IniFile::from_str(
+        let parsed = RuleSet::from_ini(&IniFile::from_str(
             "[General]\n\
              FixtureOnly=1\n\
              ExtraUnitLight=9.0\n\
@@ -13392,14 +13593,18 @@ CellSpread=0
              ExtraUnitLight=.2\n\
              ExtraInfantryLight=-.1259\n\
              ExtraAircraftLight=.3339\n",
-        ));
+        ))
+        .unwrap()
+        .general;
         assert_eq!(parsed.extra_unit_light, 200);
         assert_eq!(parsed.extra_infantry_light, -125);
         assert_eq!(parsed.extra_aircraft_light, 333);
 
-        let without_general = GeneralRules::from_ini(&IniFile::from_str(
+        let without_general = RuleSet::from_ini(&IniFile::from_str(
             "[AudioVisual]\nExtraUnitLight=.2\nExtraInfantryLight=-.1259\nExtraAircraftLight=.3339\n",
-        ));
+        ))
+        .unwrap()
+        .general;
         assert_eq!(without_general.extra_unit_light, parsed.extra_unit_light);
         assert_eq!(
             without_general.extra_infantry_light,
@@ -13421,6 +13626,26 @@ CellSpread=0
                 "raw INI integer {raw}"
             );
         }
+    }
+
+    /// The RulesClass constructor (`0x00665650`) stores 0 at `Rules+0x664`
+    /// (`0x00665F3B`), and RulesClass::ReadGeneral (`0x0066D530`) hands ReadInt
+    /// that byte as its default (`0x0066F1CB..0x0066F1E6`). Retail RULESMD
+    /// sets 2, which the overlay registry reads from the processed rules too.
+    #[test]
+    fn cliff_back_rule_without_the_key_keeps_the_constructors_zero() {
+        assert_eq!(GeneralRules::default().cliff_back_impassability, 0);
+        let other_key = IniFile::from_str("[General]\nTreeStrength=200\n");
+        assert_eq!(
+            GeneralRules::from_ini(&other_key).cliff_back_impassability,
+            0
+        );
+        assert_eq!(read_cliff_back_impassability(None), 0);
+        let Some(retail) = crate::rules::retail_ini_fixture::retail_rulesmd_rules() else {
+            return;
+        };
+        assert_eq!(retail.general.cliff_back_impassability, 2);
+        assert!(retail.overlay_registry().cliff_back_rock().is_some());
     }
 
     #[test]

@@ -110,12 +110,12 @@ fn collect_eva_object(
 /// at most once, in producer order; its result gates the caller's EVA line.
 /// That ordering belongs to the caller, not to radar events.
 ///
-/// RESIDUAL: five events are fed by both kinds of site and keep the PlayerPtr
+/// RESIDUAL: four events are fed by both kinds of site and keep the PlayerPtr
 /// test: CannotDeployHere (IsHumanPlayer in `UnitClass::Deploy` `0x007394E6`,
 /// after the `DeploysInto=` building refuses the cell), UnderAttack (building
 /// arm `0x004F9407`), HouseEva (Robot Tank, GoOnline / GoOffline, crate
-/// upgrades), Repairing (ToggleRepair `0x004470A4`) and UnitRepaired (the
-/// hospital's owner, `0x0044B93F`). Trigger: a campaign `PlayerControl=` house
+/// upgrades) and Repairing (ToggleRepair `0x004470A4`). Trigger: a campaign
+/// `PlayerControl=` house
 /// that is not the player owns a building, a `DeploysInto=` unit or a Robot
 /// Tank, or picks up a crate; effect: that line stays silent. No retail
 /// campaign reaches it. Only ALL01 (Alliance: two ORCA teams; British:
@@ -161,6 +161,9 @@ pub(super) fn dispatch_sim_sound_events(
             }
             SimSoundEvent::UnitVoiceDestroyed { owner } => {
                 GameSoundEvent::UnitVoiceDestroyed { owner }
+            }
+            SimSoundEvent::UnitVoiceMoved { from, to } => {
+                GameSoundEvent::UnitVoiceMoved { from, to }
             }
             SimSoundEvent::ObjectSoundStarted {
                 owner,
@@ -235,10 +238,6 @@ pub(super) fn dispatch_sim_sound_events(
                 world,
             } => GameSoundEvent::EntityDeployed {
                 sound_id: sim.interner().resolve(deploy_sound_id).to_string(),
-                source: Some(anim_world_sound_source(world)),
-            },
-            SimSoundEvent::LeaveTransport { sound_id, world } => GameSoundEvent::LeaveTransport {
-                sound_id: sim.interner().resolve(sound_id).to_string(),
                 source: Some(anim_world_sound_source(world)),
             },
             SimSoundEvent::EntityUndeployed {
@@ -369,20 +368,12 @@ pub(super) fn dispatch_sim_sound_events(
                 coordinate,
                 flags,
             } => {
-                // Original750B32 uses arithmetic coord>>8 for the shroud
-                // cell. Preserve direct Location XYZ; do not recenter it.
+                let coordinate = [coordinate.x, coordinate.y, coordinate.z];
                 GameSoundEvent::VocAtCoord {
                     sound_id,
-                    coordinate: [coordinate.x, coordinate.y, coordinate.z],
+                    coordinate,
                     flags,
-                    source: SoundSource::new(
-                        crate::util::lepton::absolute_leptons_to_screen(
-                            coordinate.x,
-                            coordinate.y,
-                            coordinate.z,
-                        ),
-                        ((coordinate.x >> 8) as u16, (coordinate.y >> 8) as u16),
-                    ),
+                    source: SoundSource::from_coordinate(coordinate),
                 }
             }
             SimSoundEvent::VocStopAtCoord { coordinate, flags } => GameSoundEvent::VocStopAtCoord {
@@ -453,13 +444,34 @@ pub(super) fn dispatch_sim_sound_events(
                 let ares_handler = sw.ares_eva().is_some();
                 #[cfg(not(feature = "ares"))]
                 let ares_handler = false;
-                let cue = if ares_handler
+                let mut cue = if ares_handler
                     || sw.kind == crate::rules::superweapon_type::SuperWeaponKind::ForceShield
                 {
                     SuperWeaponLaunchCue::default()
                 } else {
                     superweapon_launch_cue(sw.kind, &rules.general, sw.start_sound.as_deref())
                 };
+                // Cases 0, 7, 9 and 11 play their cue through
+                // `VocClass::PlayAtCoord @ 0x00750E20` with flags 0
+                // (`0x006CDCAE`/`0x006CDDE9`, `0x006CCE28`, `0x006CD8D3`,
+                // `0x006CD7BF`): a retained request the sound pump re-pans
+                // and stops out of earshot, not a one-shot. ForceShield's
+                // `PlayAt` cue is not dispatched here.
+                // It follows the case's EVA line (the silo arm of case 0
+                // has them the other way round, `0x006CDDE9`/`0x006CDE01`).
+                let retained_cue =
+                    cue.positional
+                        .then(|| cue.sound_id.take())
+                        .flatten()
+                        .map(|sound_id| {
+                            let coordinate = [world.x, world.y, world.z];
+                            GameSoundEvent::VocAtCoord {
+                                sound_id,
+                                coordinate,
+                                flags: 0,
+                                source: SoundSource::from_coordinate(coordinate),
+                            }
+                        });
                 // The EVA column is picked for the *listening* client's
                 // side, not the launcher's: `VoxClass::PlayEVA` takes
                 // only the event name; the consumer resolves the side.
@@ -474,30 +486,32 @@ pub(super) fn dispatch_sim_sound_events(
                     .flatten()
                     .filter(|_| local_owner_name.is_some() && !sim.local_player_defeated())
                     .map(str::to_string);
-                let activated = (cue.sound_id.is_some() || eva_event.is_some()).then(|| {
-                    GameSoundEvent::SuperWeaponActivated {
-                        sound_id: cue.sound_id.unwrap_or_default(),
-                        source: cue.positional.then(|| anim_world_sound_source(world)),
-                        eva_event,
-                    }
+                // What is left of the cue is its EVA line, with no position.
+                let activated = eva_event.map(|line| GameSoundEvent::SuperWeaponActivated {
+                    sound_id: String::new(),
+                    source: None,
+                    eva_event: Some(line),
                 });
                 // The player's tail ([`launch_drops_ready_line`]): after
                 // the case's line, the queued Ready line is dropped.
                 if let Some(ready) = launch_drops_ready_line(sw.kind).filter(|_| !ares_handler)
                     && owner_is_local(sim.interner(), owner, local_owner_name)
                 {
-                    if let Some(activated) = activated {
-                        output.push(activated);
+                    for event in activated.into_iter().chain(retained_cue) {
+                        output.push(event);
                     }
                     output.push(GameSoundEvent::EvaRemove {
                         event: ready.to_string(),
                     });
                     continue;
                 }
-                let Some(activated) = activated else {
+                if let Some(activated) = activated {
+                    output.push(activated);
+                }
+                let Some(retained_cue) = retained_cue else {
                     continue;
                 };
-                activated
+                retained_cue
             }
             SimSoundEvent::RadarEvent { radar } => {
                 // A type-13 event from `SuperClass::Launch` case 1
@@ -953,10 +967,17 @@ pub(super) fn dispatch_sim_sound_events(
                     type_override: None,
                 }
             }
-            SimSoundEvent::UnitRepaired { owner, radar } => {
-                // MissionRepair44BD96's local+41A test precedes its type8
-                // radar insertion44BDB2; admission gates the voice44BDC5.
-                if !owner_is_local(sim.interner(), owner, local_owner_name) || !admit_radar(radar) {
+            SimSoundEvent::UnitRepaired {
+                owner,
+                owner_admitted,
+                radar,
+            } => {
+                // Hospital44B93F already admitted House50B6F0. Depot44BD96
+                // defers its local+41A test; both radar insertions gate EVA
+                // (44B973/44BDC5). Do not discard an admitted campaign house.
+                if (!owner_admitted && !owner_is_local(sim.interner(), owner, local_owner_name))
+                    || !admit_radar(radar)
+                {
                     continue;
                 }
                 GameSoundEvent::Eva {
@@ -2313,14 +2334,21 @@ mod tests {
     }
 
     #[test]
-    fn depot_eva_uses_the_local_listener_and_existing_radar_admission() {
+    fn depot_and_hospital_eva_use_their_native_listener_and_radar_admission() {
+        use crate::sim::house_state::HouseState;
         use crate::sim::radar::{RadarEventRequest, RadarEventType};
         let rules = dispatch_rules();
         let mut sim = Simulation::new();
         let local = sim.intern("Local");
         let remote = sim.intern("Remote");
-        let repaired = |owner, rx| SimSoundEvent::UnitRepaired {
+        let controlled = sim.intern("Alliance");
+        let mut house = HouseState::new(controlled, 0, None, false, 0, 10);
+        house.set_player_control_for_test(true);
+        sim.houses_mut_for_test().register(house);
+        assert!(sim.house_is_human_player(controlled));
+        let repaired = |owner, rx, owner_admitted| SimSoundEvent::UnitRepaired {
             owner,
+            owner_admitted,
             radar: RadarEventRequest::new(RadarEventType::UnitRepaired, rx, 7),
         };
         let repair_type = sim.intern("GAPOWR");
@@ -2328,7 +2356,9 @@ mod tests {
         let mut output = SoundEventQueue::new();
         dispatch_sim_sound_events(
             [
-                repaired(remote, 5),
+                repaired(remote, 5, false),
+                repaired(controlled, 6, false),
+                repaired(controlled, 8, true),
                 SimSoundEvent::Repairing {
                     owner: local,
                     type_id: repair_type,
@@ -2337,8 +2367,8 @@ mod tests {
                     owner: local,
                     event: "EVA_InsufficientFunds",
                 },
-                repaired(local, 99),
-                repaired(local, 5),
+                repaired(local, 99, false),
+                repaired(local, 5, false),
             ],
             &sim,
             &rules,
@@ -2353,6 +2383,7 @@ mod tests {
         assert_eq!(
             admitted,
             [
+                (RadarEventType::UnitRepaired, 8),
                 (RadarEventType::UnitRepaired, 99),
                 (RadarEventType::UnitRepaired, 5)
             ]
@@ -2363,7 +2394,12 @@ mod tests {
                 .iter()
                 .map(GameSoundEvent::sound_id)
                 .collect::<Vec<_>>(),
-            ["EVA_Repairing", "EVA_InsufficientFunds", "EVA_UnitRepaired"],
+            [
+                "EVA_UnitRepaired",
+                "EVA_Repairing",
+                "EVA_InsufficientFunds",
+                "EVA_UnitRepaired"
+            ],
         );
     }
 
@@ -2813,15 +2849,25 @@ mod tests {
                     .drain()
                     .into_iter()
                     .flat_map(|event| match event {
+                        // The cue is a retained 750E20 request at the target
+                        // with flags 0 (`PUSH 0` at each Launch site), never
+                        // a one-shot riding on the EVA event.
                         GameSoundEvent::SuperWeaponActivated {
                             eva_event,
                             sound_id,
-                            ..
-                        } => eva_event
+                            source: None,
+                        } if sound_id.is_empty() => eva_event
                             .map(|line| format!("eva {line}"))
                             .into_iter()
-                            .chain((!sound_id.is_empty()).then(|| format!("play {sound_id}")))
-                            .collect::<Vec<_>>(),
+                            .collect(),
+                        GameSoundEvent::VocAtCoord {
+                            sound_id,
+                            coordinate,
+                            flags: 0,
+                            ..
+                        } if coordinate == [40 * 256 + 128, 40 * 256 + 128, 0] => {
+                            vec![format!("play {sound_id}")]
+                        }
                         GameSoundEvent::EvaRemove { event } => vec![format!("remove {event}")],
                         other => panic!("{other:?}"),
                     })
@@ -2836,8 +2882,8 @@ mod tests {
                     }
                 }
                 if section == "nuke_launch" {
-                    // Case 0 plays DigSound before its line (`0x006CDDE9`,
-                    // `0x006CDE01`); the one launch event carries both.
+                    // Case 0's silo arm plays DigSound before its line
+                    // (`0x006CDDE9`, `0x006CDE01`); VERA keeps one order.
                     lines.sort();
                     native.sort();
                 }
@@ -3598,7 +3644,7 @@ mod tests {
                     Some(&retail.fixed_art),
                 ),
                 ..SimResources::empty()
-            },
+            }.into(),
         };
         let frame = |runtime: &mut SimRuntime, commands: &[CommandEnvelope]| {
             let output = runtime
@@ -3979,6 +4025,7 @@ mod tests {
         dispatch_sim_sound_events(
             [SimSoundEvent::UnitRepaired {
                 owner: local,
+                owner_admitted: false,
                 radar,
             }],
             &sim,

@@ -656,6 +656,11 @@ pub struct HouseState {
     /// the shared+298 timer; Update4F87F3 clears this before Blowup_All.
     #[serde(default)]
     to_die: bool,
+    /// House+1F9: Constructor4F54A0 clears this at4F5734. Fly's
+    /// PlayfieldLatch4CD510 sets it for each qualifying evacuated passenger's
+    /// owner; TEvent::HasOccurred71E940 event18 reads it. Original gamemd.exe.
+    #[serde(default)]
+    civilians_evacuated: bool,
     /// Victory flag.
     has_won: bool,
     /// Defeat flag. Note: Flag_To_Lose clears HasWon first.
@@ -1606,6 +1611,16 @@ impl HouseState {
         self.map_is_clear
     }
 
+    pub const fn civilians_evacuated(&self) -> bool {
+        self.civilians_evacuated
+    }
+
+    /// Fly::PlayfieldLatch4CD589..4CD58F only sets the passenger House's
+    /// retained byte. It is not reset by later deaths or further evacuations.
+    pub(crate) fn mark_civilians_evacuated(&mut self) {
+        self.civilians_evacuated = true;
+    }
+
     pub const fn spy_sat_active(&self) -> bool {
         self.spy_sat_active
     }
@@ -1803,6 +1818,28 @@ impl HouseState {
             items.remove(&type_index);
         }
         self.stats.record_built();
+    }
+
+    /// Every item [`Self::produced_count`] holds for `category` whose type's
+    /// `Naval=` is `naval`, summed: how many such objects this House has
+    /// finished. War Factory and Naval Yard products feed one counter; this
+    /// keeps them apart, as the two kinds of factory are. A VERA reader
+    /// (`app::input::primary_rotation`); gamemd has no such total.
+    pub fn produced_total(
+        &self,
+        rules: &crate::rules::ruleset::RuleSet,
+        category: ObjectCategory,
+        naval: bool,
+    ) -> i64 {
+        self.produced_type_counts[category as usize]
+            .iter()
+            .filter(|&(&index, _)| {
+                rules
+                    .type_array_at(category, index)
+                    .is_some_and(|object| object.naval == naval)
+            })
+            .map(|(_, &count)| i64::from(count))
+            .sum()
     }
 
     /// Counter49FAE0's logical item query. Sparse lookup replaces native
@@ -2199,11 +2236,13 @@ impl HouseState {
 
     /// House+54E0 is forgotten if it names `building`: the new owner's clear
     /// in `BuildingClass::ChangeOwner` (`0x00448C8C`) and
-    /// `HouseClass::PointerExpired` (`0x004FB9BB`).
-    pub(crate) fn forget_lost_building(&mut self, building: u64) {
-        if self.lost_building == Some(building) {
+    /// `HouseClass::PointerExpired` (`0x004FB9BB`). Answers whether it did.
+    pub(crate) fn forget_lost_building(&mut self, building: u64) -> bool {
+        let named = self.lost_building == Some(building);
+        if named {
             self.lost_building = None;
         }
+        named
     }
 
     /// House+54E0, read by a computer engineer's Greatest_Threat.
@@ -2953,6 +2992,7 @@ impl HouseState {
             country_speed_mults: CountrySpeedMults::default(),
             is_defeated: false,
             to_die: false,
+            civilians_evacuated: false,
             has_won: false,
             has_lost: false,
             allow_win_tags: 0,
@@ -3831,5 +3871,32 @@ mod signed_country_side_tests {
         let bytes = crate::util::save_codec::serialize(&house).unwrap();
         let restored: HouseState = crate::util::save_codec::deserialize(&bytes).unwrap();
         assert_eq!(restored.side_index, -1);
+    }
+}
+
+#[cfg(test)]
+mod produced_total_tests {
+    use super::*;
+    use crate::rules::{ini_parser::IniFile, ruleset::RuleSet};
+
+    /// VERA primary rotation counts War Factory and Naval Yard products
+    /// apart, though both feed the one Vehicle counter.
+    #[test]
+    fn ships_and_tanks_are_counted_apart() {
+        let rules = RuleSet::from_ini(&IniFile::from_str(
+            "[VehicleTypes]\n0=TANK\n1=BOAT\n[TANK]\nStrength=1\n[BOAT]\nStrength=1\nNaval=yes\n",
+        ))
+        .unwrap();
+        let mut house = HouseState::new(Default::default(), 0, None, false, 0, 10);
+        house.set_produced_count_for_test(ObjectCategory::Vehicle, 0, 3);
+        house.set_produced_count_for_test(ObjectCategory::Vehicle, 1, 2);
+        assert_eq!(
+            house.produced_total(&rules, ObjectCategory::Vehicle, false),
+            3
+        );
+        assert_eq!(
+            house.produced_total(&rules, ObjectCategory::Vehicle, true),
+            2
+        );
     }
 }

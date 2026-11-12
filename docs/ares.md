@@ -42,8 +42,11 @@ complete mission loading or all downstream campaign extensions.
 
 Supported extensions:
 
-- [Ordinary ground and tower EMP](ares-emp.md) (bounded human Drive/Walk, unteamed AI Drive and independent powered defensive buildings;
-  team members, spawners and Fly/Jumpjet victims follow in [warhead residuals](ares-warhead-residuals.md))
+- [Ground, airborne and building EMP](ares-emp.md) (every Foot mover but Tunnel, human or AI,
+  miners, falling and mind-controlled victims, every EMP-prone building with its factory, gap,
+  superweapon, PowersUnit, clone, Prism and undeploy effects, the Tank Bunker exemption,
+  and the player's miner and base warnings; team members and spawners in
+  [warhead residuals](ares-warhead-residuals.md))
 - [Water and land type conversion](../src/sim/game_entity/type_conversion.rs):
   `Convert.Water` applies over water or beach; `Convert.Land` applies over land
   and bridges. It uses the same in-place conversion owner as script action 68,
@@ -56,6 +59,9 @@ Supported extensions:
 - [EVA voice tags and Side selection](ares-eva.md)
 - [Per-type promotion sounds](ares-promotion-sounds.md)
   (`Promote.VeteranSound`, `Promote.EliteSound`)
+- [Subterranean dig effects](ares-subterranean.md) (`DigIn`, `DigOut`,
+  `DigInSound`, `DigOutSound`) on the stock Tunnel locomotor, which every
+  build ports for mods that select it
 - [Finite infantry ammo](../src/sim/ammo.rs): Ares' Infantry reload dispatch
   runs through the shared Techno reload owner before the scatter/fire suffix,
   and per-weapon `Ammo` shares one count across admission, debit and reload
@@ -76,7 +82,8 @@ Supported extensions:
   `MenuText.Status`, `File.Taunt`, `ListIndex`, random/AI selection weights,
   ParentCountry inheritance, and the shell/Co-Op flag and status consumers.
   Observer art is retained but has no renderer yet.
-- [Country paradrop overrides](ares-country-paradrop.md): `ParaDrop.Types`,
+- [Paradrop overrides](ares-country-paradrop.md): the superweapon's own
+  `ParaDrop.*` planes (vehicles too), then the country's `ParaDrop.Types`,
   `.Num`, `.Aircraft` and `Parachute.Anim` in front of the SideExt values.
 - [Country AI power plants](ares-country-powerplants.md): `AI.PowerPlants=`
   and the draw among the plants the AI can build when it splices one.
@@ -152,8 +159,8 @@ Supported extensions:
   `CloningFacility`.
 - [Ivan bombs, abductors and weapon extras](ares-ivan-bomb-abductor.md):
   `IvanBomb.*` from the planting weapon, `Abductor.*` with `ImmuneToAbduction`,
-  `ApplyDamage` and `ProjectileRange`. The player's Detonate action
-  (`IvanBomb.CanDetonate*`) and `Cursor.Attack*` remain outside this chain.
+  `ApplyDamage`, `ProjectileRange` and the player's Detonate
+  (`IvanBomb.CanDetonate*`). `Cursor.Attack*` remains outside this chain.
 - [Building types](ares-building-types.md): advanced rubble (`Rubble.*`),
   `EngineerRepairable`, urban combat and raidable garrisons (`UC.*`,
   `Bunker.Raidable`, `CanBeOccupiedBy`), `IsPassable`, `EngineerDamage`,
@@ -165,8 +172,7 @@ Supported extensions:
   passive acquisition, `CivilianEnemy`, damage smoke and sparks,
   `CrashSpin`, `PassengerTurret`, self-healing rates and combat delay, fall
   rates, `AirRate`, `NoManualUnload`/`NoManualEnter`, the Desolator, cow and
-  bomb roles, drain keys and building reload. Carryall totes remain outside
-  this chain.
+  bomb roles, drain keys and building reload.
 - [Superweapon retail types](ares-superweapon-types.md): Ares handlers for
   the Chronosphere and ChronoWarp (`Chronosphere.*`, `Chronoshift.*`), Nuke
   (`Nuke.*`, `NukeFlash.Duration`, `PreImpactAnim`), Psychic Dominator
@@ -237,7 +243,11 @@ Supported extensions:
   `SpyEffect.UndoReverseEngineer`, `UnitSell`/`Unsellable` sales on a depot,
   the ProduceCash rework with `ProduceCashDisplay`, and `SecretLab.*`.
 - [Transports and payloads](ares-transports.md): `InitialPayload.*`,
-  `Convert.Deploy` and Hospital/Armory eviction on sale and capture.
+  `Convert.Deploy`, Hospital/Armory eviction on sale and capture, Carryall
+  totes (`Carryall.Allowed`, `Carryall.SizeLimit` and the 3.0 drop hooks),
+  `Passengers.Allowed`/`.Disallowed` on aircraft transports, and
+  `Assaulter.Level` over the stock assault
+  ([dormant-stock-rules.md](dormant-stock-rules.md#assaulters)).
 - [Warhead, AI and techno residuals](ares-warhead-residuals.md): airborne
   victims of the curtain, EMP and AttachEffect, PoweredBy team, spawn and slave
   updates, `TeamRetaliate`, `AIInnerBase`, `EVA.Lost`, EMP on Fly and Jumpjet
@@ -247,10 +257,16 @@ Supported extensions:
   loader hooks are deferred.
 - [Radiation types](ares-radiation.md): Ares 3.0 never loads `[RadiationTypes]`;
   its snow-theater hook is the only live radiation hook.
+- [Random-map generator](ares-rmg.md): Archipelago and Desert in the dialog, the
+  Urban Areas box and Surprise Me, `GenerateUrbanAreas` and the `[Urban]` lists,
+  urban areas with roads, buildings, foots and plazas, and the bridge, road-end
+  and `Medians` fixes.
 - [Hooks skipped on purpose](ares-skipped-hooks.md) and
   [remaining work](ares-remaining.md).
 - [INI Include and inheritance](ini-directives.md). The read-only `asset ini-expand` probe works
   in every build.
+- [INI syntax](ares-ini-syntax.md): `+=` keys, `[Child]:[Base]` sections and later-wins
+  repeated keys in every INI load, with included files loaded into the INI that lists them.
 - [Extended authored House ally lists](../tools/input_oracle/ares_allies_reader.md).
 
 ## VERA20K porting credits

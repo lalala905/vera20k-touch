@@ -64,6 +64,7 @@ pub(crate) mod action {
     /// YRpp `Repair`: entering a Grinder or a repair depot.
     pub(crate) const REPAIR: u8 = 0x0B;
     pub(crate) const SABOTAGE: u8 = 0x10;
+    pub(crate) const TOTE: u8 = 0x11;
     pub(crate) const GUARD_AREA: u8 = 0x1A;
     pub(crate) const DAMAGE: u8 = 0x1C;
     pub(crate) const GREPAIR: u8 = 0x1D;
@@ -73,6 +74,7 @@ pub(crate) mod action {
     pub(crate) const AREA_ATTACK: u8 = 0x34;
     pub(crate) const IVAN_BOMB: u8 = 0x35;
     pub(crate) const NO_IVAN_BOMB: u8 = 0x36;
+    pub(crate) const DETONATE: u8 = 0x37;
     pub(crate) const DISARM_BOMB: u8 = 0x39;
     pub(crate) const ATTACK_MOVE_NAV: u8 = 0x3E;
     pub(crate) const DEMOLISH: u8 = 0x40;
@@ -144,6 +146,7 @@ pub(crate) fn native_action(kind: CursorFeedbackKind, selected_count: usize) -> 
         Kind::Enter => ENTER,
         Kind::Grind => REPAIR,
         Kind::NoEnter => NO_ENTER,
+        Kind::Tote => TOTE,
         Kind::EngineerDamage => DAMAGE,
         Kind::RepairAction(true) => GREPAIR,
         Kind::RepairAction(false) => NO_GREPAIR,
@@ -152,6 +155,7 @@ pub(crate) fn native_action(kind: CursorFeedbackKind, selected_count: usize) -> 
         Kind::AirStrike => AIRSTRIKE,
         Kind::IvanBomb => IVAN_BOMB,
         Kind::DisarmBomb => DISARM_BOMB,
+        Kind::Detonate => DETONATE,
         Kind::Deploy => SELF_DEPLOY,
         Kind::NoDeploy => NO_DEPLOY,
         // DetermineAction's own modes and the cursor's, never a What_Action

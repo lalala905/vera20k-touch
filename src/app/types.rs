@@ -34,6 +34,9 @@ const GAME_SPEED_BUCKET_MS: u32 = 16;
 /// Convert the stored speed byte to a UI/debug rate readout. Gameplay frame
 /// admission uses the native 16 ms bucket comparison directly.
 pub(crate) fn tps_for_game_speed(stored_speed: u32) -> u32 {
+    if stored_speed == u32::from(crate::sim::game_options::GAME_SPEED_90_TPS) {
+        return 90;
+    }
     if stored_speed == 0 {
         return 60;
     }
@@ -342,6 +345,8 @@ pub(crate) enum CursorFeedbackKind {
     Grind,
     /// NoEnter cursor (action 0x1F, row 0x1A at `0x004AB382`).
     NoEnter,
+    /// Tote cursor (action 0x11): a Carryall over a Unit it may lift.
+    Tote,
     /// Engineer action28 damage cursor. Its uncommon authored-threshold
     /// display route remains outside the ordinary repair cursor proof.
     EngineerDamage,
@@ -362,6 +367,9 @@ pub(crate) enum CursorFeedbackKind {
     NoIvanBomb,
     /// Engineer defuse cursor (action 0x39 `DisarmBomb`, cursor row 59).
     DisarmBomb,
+    /// A bomb carrier's own Detonate (action 0x37, cursor row 52, the
+    /// Demolish frames; `0x004AB5CD`).
+    Detonate,
     /// Repair cursor mode active (sidebar wrench). `true` = an own building is
     /// under the cursor (wrench), `false` = no eligible target (no-repair).
     RepairMode(bool),
