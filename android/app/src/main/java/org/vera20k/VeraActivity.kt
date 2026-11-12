@@ -104,27 +104,23 @@ class VeraActivity : NativeActivity() {
     }
 
     /**
-     * Asks how the player wants to supply the installation — a folder or a ZIP
-     * — and opens that picker. Called from Rust on the UI thread
-     * (`ui::asset_import::choose_folder`); the result arrives in
-     * [onActivityResult].
+     * Opens the system folder picker for the retail installation. Called from
+     * Rust on the game's own thread (`ui::asset_import::choose_folder`); the
+     * result arrives in [onActivityResult].
      */
     fun startFolderPicker() {
-        // JNI reaches this from the game's own thread, not Android's UI thread:
-        // a dialog (and an activity result request) must be built there, or the
-        // platform throws and the card reports that this build has no picker.
-        runOnUiThread { showImportSourceChooser() }
+        // JNI reaches this from the game's thread, not Android's UI thread, and
+        // an activity result request must be made from the latter.
+        runOnUiThread { openFolderPicker() }
     }
 
-    /** Asks the player which form the installation arrives in. */
-    private fun showImportSourceChooser() {
-        AlertDialog.Builder(this)
-            .setTitle("Import game files")
-            .setMessage("Choose the installation folder, or a ZIP of it.")
-            .setPositiveButton("Folder") { _, _ -> openFolderPicker() }
-            .setNegativeButton("ZIP file") { _, _ -> openZipPicker() }
-            .setNeutralButton("Cancel", null)
-            .show()
+    /**
+     * Opens the system document picker for a ZIP of the installation. Called
+     * from Rust (`ui::asset_import::choose_zip`); the result arrives in
+     * [onActivityResult].
+     */
+    fun startZipPicker() {
+        runOnUiThread { openZipPicker() }
     }
 
     /** The system folder picker for a Storage Access Framework tree. */

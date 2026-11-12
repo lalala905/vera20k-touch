@@ -33,14 +33,12 @@ enum Action {
     Resume,
     Abort,
     Leave,
-    /// Open the import dialog on the startup-failure card.
-    ImportAssets,
     /// Ask the platform for the folder holding the retail installation.
-    ChooseFolder,
-    /// Leave the import dialog.
+    ImportFolder,
+    /// Ask the platform for a ZIP of the retail installation.
+    ImportZip,
+    /// Stop the running copy or unpack.
     CancelImport,
-    /// Dismiss the finished import dialog.
-    CloseImport,
 }
 
 impl Action {
@@ -50,10 +48,9 @@ impl Action {
             // game's string table.
             Self::Quit => return crate::i18n::tr("VERA:Quit").into(),
             Self::BackToMenu => return crate::i18n::tr("VERA:BackToMenu").into(),
-            Self::ImportAssets => return crate::i18n::tr("VERA:ImportGameFiles").into(),
-            Self::ChooseFolder => return crate::i18n::tr("VERA:ChooseFolder").into(),
+            Self::ImportFolder => return crate::i18n::tr("VERA:ImportGameFolder").into(),
+            Self::ImportZip => return crate::i18n::tr("VERA:ImportGameZip").into(),
             Self::CancelImport => return crate::i18n::tr("VERA:Cancel").into(),
-            Self::CloseImport => return crate::i18n::tr("VERA:Close").into(),
             // The game's own labels, on the in-game cards.
             Self::Resume => ("GUI:ResumeMission", "Resume Mission"),
             Self::Abort => ("GUI:AbortMission", "Abort Mission"),
@@ -78,13 +75,10 @@ impl Action {
                 state,
                 ModalOutcome::LeaveMatch { destruct: false },
             ),
-            // The import dialog is self-contained: it owns the step, and the
-            // picker itself belongs to the platform (`ui::asset_import`).
-            Self::ImportAssets => {
-                state.frontend.asset_import.open();
-                state.platform.window.request_redraw();
-            }
-            Self::ChooseFolder => {
+            // The card owns the step and the picker belongs to the platform
+            // (`ui::asset_import`); pressing the button opens the picker
+            // directly, with no dialog in between.
+            Self::ImportFolder => {
                 if !crate::ui::asset_import::choose_folder() {
                     // The build has no system picker. Say so on the card: a
                     // button that only writes to the log looks broken.
@@ -95,15 +89,21 @@ impl Action {
                 }
                 state.platform.window.request_redraw();
             }
-            Self::CancelImport => {
-                state.frontend.asset_import.press_right();
-                if crate::util::folder_picker::cancel_import() {
-                    state.frontend.asset_import.cancel_copy();
+            Self::ImportZip => {
+                if !crate::ui::asset_import::choose_zip() {
+                    state
+                        .frontend
+                        .asset_import
+                        .fail(crate::i18n::tr("VERA:NoZipPicker"));
                 }
                 state.platform.window.request_redraw();
             }
-            Self::CloseImport => {
-                state.frontend.asset_import.close();
+            Self::CancelImport => {
+                // The button only shows while an import runs; the platform's
+                // own copy job and the unpacking thread both see the request,
+                // and whichever is running reports its cancel event.
+                state.frontend.asset_import.cancel_copy();
+                crate::util::folder_picker::cancel_import();
                 state.platform.window.request_redraw();
             }
         }
@@ -111,14 +111,14 @@ impl Action {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct Buttons([Option<Action>; 2]);
+pub(crate) struct Buttons([Option<Action>; 3]);
 
 impl Buttons {
-    pub(crate) const NONE: Self = Self([None, None]);
-    pub(crate) const QUIT: Self = Self([Some(Action::Quit), None]);
-    pub(crate) const BACK_TO_MENU: Self = Self([Some(Action::BackToMenu), None]);
-    pub(crate) const MISSING_MENU: Self = Self([Some(Action::Resume), Some(Action::Abort)]);
-    pub(crate) const ABORT_CONFIRM: Self = Self([Some(Action::Leave), Some(Action::Resume)]);
+    pub(crate) const NONE: Self = Self([None, None, None]);
+    pub(crate) const QUIT: Self = Self([Some(Action::Quit), None, None]);
+    pub(crate) const BACK_TO_MENU: Self = Self([Some(Action::BackToMenu), None, None]);
+    pub(crate) const MISSING_MENU: Self = Self([Some(Action::Resume), Some(Action::Abort), None]);
+    pub(crate) const ABORT_CONFIRM: Self = Self([Some(Action::Leave), Some(Action::Resume), None]);
 
     /// The card that takes input now: render draws the same card from the
     /// same decision (`input::precedence`).
@@ -143,25 +143,31 @@ impl Buttons {
         self.0.into_iter().flatten().collect()
     }
 
-    /// The startup-failure card: the plain quit, or the import dialog's step
-    /// while one is open. Without a loaded installation the import is the way
-    /// out that does not need a file browser.
+    /// The startup-failure card: the two import buttons — folder and ZIP — and
+    /// Quit before an import runs, the copy's Cancel while one does. Without a
+    /// loaded installation the import is the way out that needs no file
+    /// browser.
     fn for_shell_error(state: &AppState) -> Self {
         use crate::ui::asset_import::ImportStep;
+        let import_buttons = Self([
+            Some(Action::ImportFolder),
+            Some(Action::ImportZip),
+            Some(Action::Quit),
+        ]);
         match state.frontend.asset_import.step() {
             ImportStep::Closed
                 if crate::ui::asset_import::AVAILABLE
                     && state.process_assets.manager().is_none() =>
             {
-                Self([Some(Action::ImportAssets), Some(Action::Quit)])
+                import_buttons
             }
             ImportStep::Closed => Self::QUIT,
-            ImportStep::ChooseFolder | ImportStep::Failed(_) => {
-                Self([Some(Action::ChooseFolder), Some(Action::CancelImport)])
-            }
-            ImportStep::Copying { .. } => Self([None, Some(Action::CancelImport)]),
+            ImportStep::Failed(_) => import_buttons,
+            ImportStep::Copying { .. } => Self([Some(Action::CancelImport), None, None]),
             ImportStep::Cancelling => Self::NONE,
-            ImportStep::Done => Self([Some(Action::CloseImport), None]),
+            // The copy exists; the running process still holds the old config,
+            // so the card asks for a restart and Quit is the way to it.
+            ImportStep::Done => Self::QUIT,
         }
     }
 }
@@ -351,7 +357,6 @@ pub(crate) fn handle_event(
                                 | Action::Quit
                                 | Action::BackToMenu
                                 | Action::CancelImport
-                                | Action::CloseImport
                         )
                     }),
                     _ => None,

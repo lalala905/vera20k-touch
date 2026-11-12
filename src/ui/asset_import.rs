@@ -1,36 +1,28 @@
-//! The import dialog shown when the game installation is missing.
+//! Progress and outcome of an asset import, shown on the startup card.
 //!
-//! This is the one dialog that has to draw without retail art — the situation
-//! it exists for — so it owns no shell artwork at all. It carries the words, the
-//! step it is on and the button labels; `app::frontend::status_screen` renders
-//! it in VERA's bundled fonts, the same card that already reports a missing
-//! installation.
+//! The startup-failure card carries the import buttons itself — one for a
+//! folder, one for a ZIP — so there is no second dialog: pressing a button
+//! opens the platform's picker directly (`util::folder_picker`,
+//! `util::zip_picker`), and this type only owns what the card says while the
+//! copy or unpack runs and how it ended. The platform reports through
+//! `util::import_status`, and the card drains those events on the frame it
+//! draws.
 //!
-//! The folder picker itself is the platform's business: Android has to reach
-//! `ACTION_OPEN_DOCUMENT_TREE` through JNI, the desktop builds already have a
-//! native chooser. [`choose_folder`] is the seam; until a platform fills it in,
-//! the dialog explains and the button reports that picking is unavailable.
-//!
-//! Its words come from VERA's language files (`crate::i18n`): the dialog shows
+//! Its words come from VERA's language files (`crate::i18n`): the card shows
 //! before the game's string table can load.
 
-/// Whether this build offers the import wizard.
+/// Whether this build offers the import buttons.
 ///
-/// Android only. The desktop builds keep the startup card exactly as it was
-/// before this dialog existed — a single Quit — because a packaged desktop
-/// launch already has a native folder chooser. Every gate on this dialog (the
-/// card's button, the body swap) uses this constant, so the desktop card cannot
-/// drift one branch at a time.
+/// Android only: the desktop builds keep the startup card as it was, because a
+/// packaged desktop launch already has a native folder chooser.
 pub(crate) const AVAILABLE: bool = cfg!(target_os = "android");
 
-/// Where the import flow stands.
+/// Where an import stands.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) enum ImportStep {
-    /// The card is not showing the import dialog.
+    /// No import has run, or the card was reset after one.
     #[default]
     Closed,
-    /// Explaining what to pick, before the player confirms.
-    ChooseFolder,
     /// Copying the installation into the app's own folder.
     Copying { done: u64, total: Option<u64> },
     /// Waiting for the copying worker to stop and remove its partial files.
@@ -41,7 +33,7 @@ pub(crate) enum ImportStep {
     Failed(String),
 }
 
-/// The import dialog's state.
+/// The import's state on the card.
 #[derive(Debug, Default)]
 pub(crate) struct AssetImport {
     step: ImportStep,
@@ -56,21 +48,19 @@ impl AssetImport {
         &self.step
     }
 
-    /// Draw and take input for the dialog rather than the plain error card.
-    pub(crate) fn is_open(&self) -> bool {
-        self.step != ImportStep::Closed
-    }
-
-    /// The player asked to import: switch to explaining what to pick.
-    pub(crate) fn open(&mut self) {
-        if self.step == ImportStep::Closed {
-            self.step = ImportStep::ChooseFolder;
-        }
+    /// An import is running or waiting for its worker to stop; the card shows
+    /// the progress and a Cancel button instead of the import buttons.
+    pub(crate) fn is_busy(&self) -> bool {
+        matches!(
+            self.step,
+            ImportStep::Copying { .. } | ImportStep::Cancelling
+        )
     }
 
     /// Back to the plain card, leaving the error text underneath untouched.
     pub(crate) fn close(&mut self) {
         self.step = ImportStep::Closed;
+        self.imported = None;
     }
 
     /// The platform handed a copy job its size (unknown for some sources,
@@ -101,69 +91,34 @@ impl AssetImport {
         self.step = ImportStep::Failed(why.into());
     }
 
-    pub(crate) fn title(&self) -> String {
-        crate::i18n::tr("VERA:ImportGameFiles")
-    }
-
-    /// The card's body: what is missing, what to pick, and the current step.
-    pub(crate) fn body(&self, game_files: &str, config: &str) -> String {
+    /// The step's sentence for the card, or nothing while no import has run.
+    pub(crate) fn status_note(&self) -> Option<String> {
         use crate::i18n::{tr, tr_fill};
         const MB: u64 = 1024 * 1024;
-        let mut text = tr("VERA:ImportExplain");
-        text.push_str("\n\n");
-        let step = match &self.step {
-            ImportStep::Closed | ImportStep::ChooseFolder => None,
+        Some(match &self.step {
+            ImportStep::Closed => return None,
             ImportStep::Copying {
                 done,
                 total: Some(total),
-            } => Some(tr_fill(
+            } => tr_fill(
                 "VERA:ImportCopyingOf",
                 &[("done", &(done / MB)), ("total", &(total / MB))],
-            )),
+            ),
             ImportStep::Copying { done, total: None } => {
-                Some(tr_fill("VERA:ImportCopying", &[("done", &(done / MB))]))
+                tr_fill("VERA:ImportCopying", &[("done", &(done / MB))])
             }
-            ImportStep::Done => Some(tr("VERA:ImportCopied")),
-            ImportStep::Cancelling => Some(tr("VERA:ImportCancelling")),
-            ImportStep::Failed(why) => Some(tr_fill("VERA:ImportFailed", &[("reason", why)])),
-        };
-        if let Some(step) = step {
-            text.push_str(&step);
-            text.push_str("\n\n");
-        }
-        // Once the copy exists, name it: the caller's `game_files` still holds
-        // the folder this process started with, which is exactly the stale value
-        // the copy just replaced.
-        let shown = self.imported.as_deref().unwrap_or(game_files);
-        text.push_str(&tr_fill("VERA:ImportGameFilesAt", &[("path", &shown)]));
-        if !config.is_empty() {
-            text.push('\n');
-            text.push_str(&tr_fill("VERA:ImportConfigAt", &[("path", &config)]));
-        }
-        text
+            ImportStep::Cancelling => tr("VERA:ImportCancelling"),
+            ImportStep::Done => tr("VERA:ImportCopied"),
+            ImportStep::Failed(why) => tr_fill("VERA:ImportFailed", &[("reason", why)]),
+        })
     }
 
-    /// The card's Cancel button. Cancellation keeps the dialog busy until the
-    /// platform confirms that copying has stopped.
-    pub(crate) fn press_right(&mut self) -> ButtonPress {
-        match self.step {
-            ImportStep::ChooseFolder | ImportStep::Failed(_) => self.close(),
-            ImportStep::Copying { .. } => {
-                self.cancel_copy();
-                return ButtonPress::CancelCopy;
-            }
-            _ => {}
-        }
-        ButtonPress::Ignored
+    /// The line naming the copy once one exists, or nothing before that.
+    pub(crate) fn imported_line(&self) -> Option<String> {
+        self.imported
+            .as_deref()
+            .map(|path| crate::i18n::tr_fill("VERA:ImportGameFilesAt", &[("path", &path)]))
     }
-}
-
-/// What the pressed button asks the caller to do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ButtonPress {
-    CancelCopy,
-    /// Handled inside the dialog.
-    Ignored,
 }
 
 /// Ask the platform for the folder holding the retail installation.
@@ -178,55 +133,88 @@ pub(crate) fn choose_folder() -> bool {
     true
 }
 
+/// Ask the platform for a ZIP of the retail installation.
+///
+/// `false` means this build has no picker; `true` means the platform opened it
+/// and will hand the archive to `app::game_import` when the player picks one.
+pub(crate) fn choose_zip() -> bool {
+    if !crate::util::zip_picker::request() {
+        log::info!("asset import: this build has no ZIP picker wired yet");
+        return false;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn opening_moves_from_the_plain_card_to_the_explanation() {
-        let mut dialog = AssetImport::default();
-        assert!(!dialog.is_open());
-        dialog.open();
-        assert!(dialog.is_open());
-        assert_eq!(dialog.step(), &ImportStep::ChooseFolder);
-    }
-
-    #[test]
-    fn cancelling_returns_to_the_plain_card() {
-        let mut dialog = AssetImport::default();
-        dialog.open();
-        dialog.press_right();
-        assert!(!dialog.is_open());
+    fn the_card_says_nothing_until_an_import_starts() {
+        let import = AssetImport::default();
+        assert!(!import.is_busy());
+        assert_eq!(import.status_note(), None);
+        assert_eq!(import.imported_line(), None);
     }
 
     #[test]
     fn a_copy_without_a_known_size_still_reports_progress_lines() {
-        let mut dialog = AssetImport::default();
-        dialog.open();
-        dialog.start_copy(None);
-        dialog.advance_copy(8 * 1024 * 1024);
-        assert!(dialog.body("", "").contains("Copying: 8 MB."));
+        let mut import = AssetImport::default();
+        import.start_copy(None);
+        assert!(import.is_busy());
+        import.advance_copy(8 * 1024 * 1024);
+        assert!(
+            import
+                .status_note()
+                .is_some_and(|note| note.contains("Copying: 8 MB."))
+        );
     }
 
     #[test]
-    fn a_failure_reports_its_reason() {
-        let mut dialog = AssetImport::default();
-        dialog.open();
-        dialog.start_copy(Some(10));
-        dialog.fail("not enough space");
-        assert!(dialog.body("", "").contains("Failed: not enough space"));
+    fn a_known_size_reports_both_numbers() {
+        let mut import = AssetImport::default();
+        import.start_copy(Some(20 * 1024 * 1024));
+        import.advance_copy(5 * 1024 * 1024);
+        let note = import.status_note().expect("copying has a note");
+        assert!(note.contains("5 of 20 MB"), "{note}");
     }
 
     #[test]
-    fn cancelling_cannot_start_another_copy_before_the_worker_finishes() {
-        let mut dialog = AssetImport::default();
-        dialog.start_copy(None);
-        assert_eq!(dialog.press_right(), ButtonPress::CancelCopy);
-        dialog.open();
-        dialog.advance_copy(16);
-        assert_eq!(dialog.step(), &ImportStep::Cancelling);
-        dialog.close(); // The platform's Cancelled completion event.
-        dialog.open();
-        assert_eq!(dialog.step(), &ImportStep::ChooseFolder);
+    fn a_failure_reports_its_reason_and_ends_the_busy_state() {
+        let mut import = AssetImport::default();
+        import.start_copy(Some(10));
+        import.fail("not enough space");
+        assert!(!import.is_busy());
+        assert!(
+            import
+                .status_note()
+                .is_some_and(|n| n.contains("not enough space"))
+        );
+    }
+
+    #[test]
+    fn a_finished_copy_names_its_folder_and_closing_resets_the_card() {
+        let mut import = AssetImport::default();
+        import.start_copy(None);
+        import.finish_copy("/data/ra2");
+        let note = import.status_note().expect("done has a note");
+        assert!(note.contains("Restart VERA20K"), "{note}");
+        assert!(
+            import
+                .imported_line()
+                .is_some_and(|line| line.contains("/data/ra2"))
+        );
+        import.close();
+        assert_eq!(import.step(), &ImportStep::Closed);
+        assert_eq!(import.imported_line(), None);
+    }
+
+    #[test]
+    fn cancelling_keeps_the_card_busy_until_the_worker_stops() {
+        let mut import = AssetImport::default();
+        import.start_copy(None);
+        import.cancel_copy();
+        assert!(import.is_busy());
+        assert!(import.status_note().is_some());
     }
 }

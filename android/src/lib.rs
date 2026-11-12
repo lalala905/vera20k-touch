@@ -54,6 +54,19 @@ fn request_folder_picker() -> bool {
     .unwrap_or(false)
 }
 
+/// ZIP-picker hook for `vera20k::util::zip_picker`.
+///
+/// The document picker is the activity's: this starts it, and the chosen
+/// archive comes back through `nativeOnZipPicked` once the activity has copied
+/// it to a real file.
+fn request_zip_picker() -> bool {
+    with_activity(|env, activity| {
+        env.call_method(activity, "startZipPicker", "()V", &[])
+            .is_ok()
+    })
+    .unwrap_or(false)
+}
+
 fn cancel_import() -> bool {
     let folder_copy = with_activity(|env, activity| {
         env.call_method(activity, "cancelImport", "()Z", &[])
@@ -380,6 +393,7 @@ fn adopt_pushed_game_files(dir: &std::path::Path) {
 fn android_main(app: AndroidApp) {
     keep_screen_on(&app);
     vera20k::util::folder_picker::install(request_folder_picker, cancel_import);
+    vera20k::util::zip_picker::install(request_zip_picker);
     // The launcher icon is a compiled resource, so the VERA Icon box's choice
     // reaches the two activity aliases only through PackageManager.
     vera20k::util::app_icon::install(apply_app_icon);

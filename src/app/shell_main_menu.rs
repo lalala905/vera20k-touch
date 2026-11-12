@@ -1175,31 +1175,30 @@ impl App {
             .game_config
             .as_ref()
             .map(|config| config.paths.ra2_dir.clone());
-        let (title, text) =
-            if crate::ui::asset_import::AVAILABLE && state.frontend.asset_import.is_open() {
-                // Same label as the card behind it: the dialog must not name a
-                // fallback path the card has just stopped naming.
-                let game_files_text = game_installation_label(game_files.as_deref());
-                (
-                    state.frontend.asset_import.title(),
-                    state.frontend.asset_import.body(&game_files_text, ""),
-                )
-            } else {
-                let (title, mut text) = shell_error_card(
-                    CardHost::CURRENT,
-                    &state.frontend.startup_files,
-                    state.process_assets.manager().is_some(),
-                    game_files.as_deref(),
-                    crate::util::logging::log_file(),
-                    &error,
-                );
-                // The next start is without the mod (`mods::finish_start`).
-                if let Some(active) = &state.frontend.mods.active {
-                    text.push_str("\n\n");
-                    text.push_str(&crate::app::mods::start_failed_text(&active.title));
-                }
-                (title, text)
-            };
+        let (title, mut text) = shell_error_card(
+            CardHost::CURRENT,
+            &state.frontend.startup_files,
+            state.process_assets.manager().is_some(),
+            game_files.as_deref(),
+            crate::util::logging::log_file(),
+            &error,
+        );
+        // An import in progress, or how one ended, sits below the card's own
+        // words; its buttons change with it (status_screen).
+        if let Some(note) = state.frontend.asset_import.status_note() {
+            text.push_str("\n\n");
+            text.push_str(&note);
+        }
+        if let Some(line) = state.frontend.asset_import.imported_line() {
+            text.push('\n');
+            text.push_str(&line);
+        }
+        // The next start is without the mod (`mods::finish_start`).
+        if let Some(active) = &state.frontend.mods.active {
+            text.push_str("\n\n");
+            text.push_str(&crate::app::mods::start_failed_text(&active.title));
+        }
+        let text = text;
         crate::app::frontend::status_screen::render(
             state,
             encoder,
