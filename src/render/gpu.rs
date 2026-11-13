@@ -243,7 +243,11 @@ impl GpuContext {
         // https://docs.rs/wgpu-types/30.0.1/wgpu_types/struct.InstanceDescriptor.html
         #[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
         let instance: wgpu::Instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY.with_env(),
+            backends: if cfg!(target_os = "android") {
+    wgpu::Backends::GL.with_env()
+} else {
+    wgpu::Backends::PRIMARY.with_env()
+},
             ..wgpu::InstanceDescriptor::new_with_display_handle(Box::new(display))
         });
         // Browsers without a usable WebGPU adapter fall back to WebGL2. A
