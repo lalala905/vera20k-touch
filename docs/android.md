@@ -1,5 +1,8 @@
 # Android build
 
+This fork's touch and import work, and the notes for merging it with upstream,
+live in [android-touch-branch.md](android-touch-branch.md).
+
 **Status: initial Android support.** The contributor reported a debug APK playing
 the intro movie, reaching the main menu, and importing a retail installation on an
 Android 16 arm64 tablet (OnePlus Pad 2 Pro). The review fixes have not been built or
